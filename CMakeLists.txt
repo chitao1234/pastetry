@@ -27,20 +27,20 @@ target_link_libraries(pastetry_common
         Qt6::Network
 )
 
-add_executable(clipd
+add_executable(pastetry-clipd
     src/clipd/main.cpp
     src/clipd/clipboard_daemon.cpp
 )
 
-target_link_libraries(clipd PRIVATE pastetry_common)
+target_link_libraries(pastetry-clipd PRIVATE pastetry_common)
 
-add_executable(clip-ui
+add_executable(pastetry-clip-ui
     src/clip-ui/main.cpp
     src/clip-ui/history_model.cpp
     src/clip-ui/main_window.cpp
 )
 
-target_link_libraries(clip-ui
+target_link_libraries(pastetry-clip-ui
     PRIVATE
         pastetry_common
         Qt6::Widgets

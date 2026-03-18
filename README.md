@@ -4,7 +4,7 @@ Cross-platform clipboard manager prototype with a daemon + Qt Widgets UI.
 
 ## Features implemented
 
-- Clipboard daemon (`clipd`) that captures common rich clipboard formats:
+- Clipboard daemon (`pastetry-clipd`) that captures common rich clipboard formats:
   - `text/plain`
   - `text/html`
   - `text/rtf` / `application/rtf`
@@ -16,7 +16,7 @@ Cross-platform clipboard manager prototype with a daemon + Qt Widgets UI.
   - Pagination-ready query API
 - Blob store for large/rich payloads with deduplication and reference counting.
 - Local IPC over `QLocalServer`/`QLocalSocket` with CBOR-framed messages.
-- Qt Widgets UI (`clip-ui`) with:
+- Qt Widgets UI (`pastetry-clip-ui`) with:
   - Search
   - Paginated list view
   - Activate (restore to clipboard)
@@ -43,13 +43,13 @@ ctest --test-dir build --output-on-failure
 Terminal 1:
 
 ```bash
-./build/clipd
+./build/pastetry-clipd
 ```
 
 Terminal 2:
 
 ```bash
-./build/clip-ui
+./build/pastetry-clip-ui
 ```
 
 Optional arguments for both binaries:
