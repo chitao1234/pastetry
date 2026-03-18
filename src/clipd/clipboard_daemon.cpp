@@ -61,6 +61,7 @@ QCborMap toCbor(const EntrySummary &entry) {
     map.insert(QStringLiteral("source_app"), entry.sourceApp);
     map.insert(QStringLiteral("pinned"), entry.pinned);
     map.insert(QStringLiteral("format_count"), entry.formatCount);
+    map.insert(QStringLiteral("image_blob_hash"), entry.imageBlobHash);
     return map;
 }
 
@@ -95,6 +96,26 @@ QVector<QUrl> parseUriList(const QByteArray &bytes) {
         urls.push_back(QUrl::fromEncoded(trimmed));
     }
     return urls;
+}
+
+QByteArray makeImagePreviewPng(const QByteArray &rawImageBytes, int maxEdge) {
+    const QImage source = QImage::fromData(rawImageBytes);
+    if (source.isNull()) {
+        return {};
+    }
+
+    const int safeMaxEdge = qBound(16, maxEdge, 512);
+    const QImage scaled =
+        source.scaled(safeMaxEdge, safeMaxEdge, Qt::KeepAspectRatio,
+                      Qt::SmoothTransformation);
+
+    QByteArray pngBytes;
+    QBuffer buffer(&pngBytes);
+    buffer.open(QIODevice::WriteOnly);
+    if (!scaled.save(&buffer, "PNG")) {
+        return {};
+    }
+    return pngBytes;
 }
 }  // namespace
 
@@ -342,6 +363,29 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         }
         QCborMap payload;
         payload.insert(QStringLiteral("status"), "ok");
+        return ipc::makeResponse(id, payload);
+    }
+
+    if (method == "GetImagePreview") {
+        const QString blobHash = params.value("blob_hash").toString();
+        if (blobHash.isEmpty()) {
+            return ipc::makeError(id, QStringLiteral("blob_hash is required"));
+        }
+
+        const int maxEdge = params.value("max_edge").toInteger();
+        const QByteArray rawImageBytes = m_repo.loadBlob(blobHash, &error);
+        if (!error.isEmpty()) {
+            return ipc::makeError(id, error);
+        }
+
+        const QByteArray pngBytes = makeImagePreviewPng(rawImageBytes, maxEdge);
+        if (pngBytes.isEmpty()) {
+            return ipc::makeError(id, QStringLiteral("Failed to decode image blob"));
+        }
+
+        QCborMap payload;
+        payload.insert(QStringLiteral("mime_type"), QStringLiteral("image/png"));
+        payload.insert(QStringLiteral("bytes"), pngBytes);
         return ipc::makeResponse(id, payload);
     }
 

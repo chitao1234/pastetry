@@ -18,6 +18,10 @@ public:
         ColumnCount = 4,
     };
 
+    enum Role {
+        ImageBlobHashRole = Qt::UserRole + 1,
+    };
+
     explicit HistoryModel(QObject *parent = nullptr);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;

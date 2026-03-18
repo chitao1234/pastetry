@@ -32,6 +32,7 @@ struct EntrySummary {
     QString sourceApp;
     bool pinned = false;
     int formatCount = 0;
+    QString imageBlobHash;
 };
 
 struct EntryDetail {

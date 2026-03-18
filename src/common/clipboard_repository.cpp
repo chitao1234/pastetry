@@ -180,7 +180,10 @@ SearchResult ClipboardRepository::searchEntries(const QString &query, int cursor
     if (query.trimmed().isEmpty()) {
         select.prepare(
             "SELECT e.id, e.created_at_ms, e.preview, e.source_app, e.pinned, "
-            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count "
+            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count, "
+            "(SELECT ef2.blob_hash FROM entry_formats ef2 "
+            "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
+            "AS image_blob_hash "
             "FROM entries e "
             "ORDER BY e.pinned DESC, e.created_at_ms DESC "
             "LIMIT ? OFFSET ?");
@@ -189,7 +192,10 @@ SearchResult ClipboardRepository::searchEntries(const QString &query, int cursor
     } else {
         select.prepare(
             "SELECT e.id, e.created_at_ms, e.preview, e.source_app, e.pinned, "
-            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count "
+            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count, "
+            "(SELECT ef2.blob_hash FROM entry_formats ef2 "
+            "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
+            "AS image_blob_hash "
             "FROM entries_fts f "
             "JOIN entries e ON e.id = f.rowid "
             "WHERE entries_fts MATCH ? "
@@ -215,6 +221,7 @@ SearchResult ClipboardRepository::searchEntries(const QString &query, int cursor
         summary.sourceApp = select.value(3).toString();
         summary.pinned = select.value(4).toInt() == 1;
         summary.formatCount = select.value(5).toInt();
+        summary.imageBlobHash = select.value(6).toString();
         result.entries.push_back(summary);
     }
 

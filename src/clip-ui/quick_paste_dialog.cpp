@@ -31,6 +31,7 @@ QVector<EntrySummary> parseSummaries(const QCborArray &items) {
         entry.sourceApp = map.value(QStringLiteral("source_app")).toString();
         entry.pinned = map.value(QStringLiteral("pinned")).toBool();
         entry.formatCount = map.value(QStringLiteral("format_count")).toInteger();
+        entry.imageBlobHash = map.value(QStringLiteral("image_blob_hash")).toString();
         entries.push_back(entry);
     }
 
@@ -51,7 +52,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
 
     m_table = new QTableView(this);
     m_model = new HistoryModel(this);
-    m_previewDelegate = new PreviewTextDelegate(m_table);
+    m_previewDelegate = new PreviewTextDelegate(m_client, m_table);
     m_table->setModel(m_model);
     m_table->setItemDelegateForColumn(HistoryModel::PreviewColumn, m_previewDelegate);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);

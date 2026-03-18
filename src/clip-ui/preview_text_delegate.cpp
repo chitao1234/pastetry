@@ -1,15 +1,19 @@
 #include "clip-ui/preview_text_delegate.h"
 
+#include "clip-ui/history_model.h"
+
 #include <QApplication>
+#include <QImage>
 #include <QPainter>
+#include <QPixmap>
 #include <QStyle>
 #include <QStyleOptionViewItem>
 #include <QTextLayout>
 
 namespace pastetry {
 
-PreviewTextDelegate::PreviewTextDelegate(QObject *parent)
-    : QStyledItemDelegate(parent) {}
+PreviewTextDelegate::PreviewTextDelegate(IpcClient client, QObject *parent)
+    : QStyledItemDelegate(parent), m_client(std::move(client)) {}
 
 void PreviewTextDelegate::setMaxLines(int maxLines) {
     m_maxLines = qBound(1, maxLines, 12);
@@ -65,6 +69,55 @@ QStringList PreviewTextDelegate::wrappedLines(const QString &text, const QFont &
     return lines;
 }
 
+QPixmap PreviewTextDelegate::imageForHash(const QString &hash, int targetSide) const {
+    if (hash.isEmpty() || targetSide <= 0) {
+        return {};
+    }
+
+    const QString cacheKey = QStringLiteral("%1:%2").arg(hash).arg(targetSide);
+    auto it = m_imageCache.constFind(cacheKey);
+    if (it != m_imageCache.constEnd()) {
+        return it.value();
+    }
+
+    if (m_failedImageHashes.contains(cacheKey)) {
+        return {};
+    }
+
+    QString error;
+    QCborMap params;
+    params.insert(QStringLiteral("blob_hash"), hash);
+    params.insert(QStringLiteral("max_edge"), targetSide);
+
+    const QCborMap result =
+        m_client.request(QStringLiteral("GetImagePreview"), params, 1200, &error);
+    if (!error.isEmpty()) {
+        m_failedImageHashes.insert(cacheKey, true);
+        return {};
+    }
+
+    const QByteArray bytes = result.value(QStringLiteral("bytes")).toByteArray();
+    if (bytes.isEmpty()) {
+        m_failedImageHashes.insert(cacheKey, true);
+        return {};
+    }
+
+    const QImage image = QImage::fromData(bytes);
+    if (image.isNull()) {
+        m_failedImageHashes.insert(cacheKey, true);
+        return {};
+    }
+
+    const QPixmap pixmap = QPixmap::fromImage(image);
+    if (pixmap.isNull()) {
+        m_failedImageHashes.insert(cacheKey, true);
+        return {};
+    }
+
+    m_imageCache.insert(cacheKey, pixmap);
+    return pixmap;
+}
+
 void PreviewTextDelegate::paint(QPainter *painter,
                                 const QStyleOptionViewItem &option,
                                 const QModelIndex &index) const {
@@ -81,6 +134,43 @@ void PreviewTextDelegate::paint(QPainter *painter,
         style->subElementRect(QStyle::SE_ItemViewItemText, &opt, opt.widget);
     if (textRect.width() <= 0 || textRect.height() <= 0) {
         return;
+    }
+
+    const QString imageBlobHash = index.data(HistoryModel::ImageBlobHashRole).toString();
+    if (!imageBlobHash.isEmpty()) {
+        const int thumbSide = qMax(16, textRect.height() - 4);
+        const QRect thumbRect(textRect.left(),
+                              textRect.top() + (textRect.height() - thumbSide) / 2,
+                              thumbSide, thumbSide);
+
+        const QPixmap pixmap = imageForHash(imageBlobHash, thumbSide);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(opt.palette.color(QPalette::Mid));
+        painter->setBrush(opt.palette.color(QPalette::Base));
+        painter->drawRoundedRect(thumbRect.adjusted(0, 0, -1, -1), 3, 3);
+
+        if (!pixmap.isNull()) {
+            const QPixmap fitted =
+                pixmap.scaled(thumbRect.size() - QSize(2, 2), Qt::KeepAspectRatio,
+                              Qt::SmoothTransformation);
+            const QRect imageRect(
+                thumbRect.center().x() - fitted.width() / 2,
+                thumbRect.center().y() - fitted.height() / 2,
+                fitted.width(), fitted.height());
+            painter->drawPixmap(imageRect, fitted);
+        } else {
+            painter->setPen(opt.palette.color(QPalette::Text));
+            painter->drawText(thumbRect, Qt::AlignCenter, QStringLiteral("IMG"));
+        }
+
+        painter->restore();
+
+        textRect.adjust(thumbRect.width() + 8, 0, 0, 0);
+        if (textRect.width() <= 0) {
+            return;
+        }
     }
 
     QStringList lines = wrappedLines(rawText, opt.font, textRect.width());

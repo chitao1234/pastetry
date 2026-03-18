@@ -47,6 +47,10 @@ QVariant HistoryModel::data(const QModelIndex &index, int role) const {
         return entry.preview;
     }
 
+    if (role == ImageBlobHashRole) {
+        return entry.imageBlobHash;
+    }
+
     if (role == Qt::TextAlignmentRole && index.column() >= FormatsColumn) {
         return Qt::AlignCenter;
     }
