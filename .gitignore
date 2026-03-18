@@ -1,0 +1,25 @@
+# Build artifacts
+/build/
+
+# CMake
+CMakeUserPresets.json
+CMakePresets.json
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Test artifacts
+Testing/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
