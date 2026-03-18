@@ -68,11 +68,19 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setAlternatingRowColors(true);
+    m_table->setWordWrap(true);
+    m_table->setTextElideMode(Qt::ElideRight);
+    m_table->verticalHeader()->setVisible(false);
+    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     m_table->horizontalHeader()->setStretchLastSection(false);
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::TimeColumn,
+                                                      QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PreviewColumn,
+                                                      QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::FormatsColumn,
+                                                      QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PinnedColumn,
+                                                      QHeaderView::ResizeToContents);
 
     layout->addLayout(toolbar);
     layout->addWidget(m_table);
@@ -93,6 +101,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     connect(m_clearButton, &QPushButton::clicked, this, &MainWindow::clearHistory);
     connect(m_table, &QTableView::doubleClicked, this, [this] { activateSelected(); });
 
+    applyTableLayout();
     loadInitial();
 }
 
@@ -104,6 +113,20 @@ void MainWindow::showAndActivate() {
 
 void MainWindow::setCloseToTrayEnabled(bool enabled) {
     m_closeToTrayEnabled = enabled;
+}
+
+void MainWindow::setVisibleColumns(const QVector<bool> &visibleColumns) {
+    if (visibleColumns.size() != HistoryModel::ColumnCount) {
+        return;
+    }
+
+    m_visibleColumns = visibleColumns;
+    applyTableLayout();
+}
+
+void MainWindow::setPreviewLineCount(int lineCount) {
+    m_previewLineCount = qBound(1, lineCount, 12);
+    applyTableLayout();
 }
 
 qint64 MainWindow::selectedEntryId() const {
@@ -140,6 +163,17 @@ void MainWindow::refresh(bool resetCursor) {
     m_loadMoreButton->setEnabled(m_cursor >= 0);
     statusBar()->showMessage(QStringLiteral("Loaded %1 entries").arg(m_model->rowCount()),
                              2000);
+}
+
+void MainWindow::applyTableLayout() {
+    for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
+        const bool visible = column < m_visibleColumns.size() ? m_visibleColumns.at(column) : true;
+        m_table->setColumnHidden(column, !visible);
+    }
+
+    const QFontMetrics fm(m_table->font());
+    const int rowHeight = fm.lineSpacing() * m_previewLineCount + 8;
+    m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
 }
 
 void MainWindow::loadInitial() {

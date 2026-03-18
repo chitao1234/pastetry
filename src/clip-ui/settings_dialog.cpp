@@ -1,19 +1,42 @@
 #include "clip-ui/settings_dialog.h"
 
+#include "clip-ui/history_model.h"
+
+#include <QAbstractButton>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 namespace pastetry {
+namespace {
+
+QString columnLabel(int column) {
+    switch (column) {
+        case HistoryModel::TimeColumn:
+            return QStringLiteral("Time");
+        case HistoryModel::PreviewColumn:
+            return QStringLiteral("Preview");
+        case HistoryModel::FormatsColumn:
+            return QStringLiteral("Formats");
+        case HistoryModel::PinnedColumn:
+            return QStringLiteral("Pinned");
+        default:
+            return QStringLiteral("Unknown");
+    }
+}
+
+}  // namespace
 
 SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Settings"));
-    resize(460, 220);
+    resize(560, 360);
 
     auto *mainLayout = new QVBoxLayout(this);
     auto *form = new QFormLayout();
@@ -34,12 +57,50 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 
     m_startToTray = new QCheckBox(QStringLiteral("Start minimized to tray"), this);
 
+    auto *columnsWidget = new QWidget(this);
+    auto *columnsLayout = new QGridLayout(columnsWidget);
+    columnsLayout->setContentsMargins(0, 0, 0, 0);
+    columnsLayout->setColumnStretch(0, 1);
+    columnsLayout->setColumnStretch(1, 1);
+
+    auto *historyLabel = new QLabel(QStringLiteral("History view"), columnsWidget);
+    auto *quickLabel = new QLabel(QStringLiteral("Quick paste view"), columnsWidget);
+    columnsLayout->addWidget(historyLabel, 0, 0);
+    columnsLayout->addWidget(quickLabel, 0, 1);
+
+    auto *historyContainer = new QWidget(columnsWidget);
+    auto *historyColumnLayout = new QVBoxLayout(historyContainer);
+    historyColumnLayout->setContentsMargins(0, 0, 0, 0);
+    auto *quickContainer = new QWidget(columnsWidget);
+    auto *quickColumnLayout = new QVBoxLayout(quickContainer);
+    quickColumnLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_historyColumnChecks.resize(HistoryModel::ColumnCount);
+    m_quickPasteColumnChecks.resize(HistoryModel::ColumnCount);
+    for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
+        auto *historyCheck = new QCheckBox(columnLabel(column), historyContainer);
+        auto *quickCheck = new QCheckBox(columnLabel(column), quickContainer);
+        m_historyColumnChecks[column] = historyCheck;
+        m_quickPasteColumnChecks[column] = quickCheck;
+        historyColumnLayout->addWidget(historyCheck);
+        quickColumnLayout->addWidget(quickCheck);
+    }
+
+    columnsLayout->addWidget(historyContainer, 1, 0);
+    columnsLayout->addWidget(quickContainer, 1, 1);
+
+    m_previewLines = new QSpinBox(this);
+    m_previewLines->setMinimum(1);
+    m_previewLines->setMaximum(12);
+
     form->addRow(QStringLiteral("Global shortcut"), shortcutRow);
     form->addRow(QStringLiteral("Shortcut status"), m_shortcutStatus);
+    form->addRow(QStringLiteral("Visible columns"), columnsWidget);
+    form->addRow(QStringLiteral("Preview lines"), m_previewLines);
     form->addRow(QString(), m_startToTray);
 
-    auto *buttons =
-        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, this);
 
     mainLayout->addLayout(form);
     mainLayout->addStretch(1);
@@ -50,12 +111,36 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     });
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+    if (QAbstractButton *applyButton = buttons->button(QDialogButtonBox::Apply)) {
+        connect(applyButton, &QAbstractButton::clicked, this,
+                &SettingsDialog::applyRequested);
+    }
 }
 
 void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
-                               const QString &shortcutStatusText) {
+                               const QString &shortcutStatusText,
+                               const QVector<bool> &historyColumns,
+                               const QVector<bool> &quickPasteColumns,
+                               int previewLineCount) {
     m_shortcutEdit->setKeySequence(shortcut);
     m_startToTray->setChecked(startToTray);
+    setShortcutStatusText(shortcutStatusText);
+
+    for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
+        const bool historyVisible =
+            column < historyColumns.size() ? historyColumns.at(column) : true;
+        const bool quickVisible =
+            column < quickPasteColumns.size() ? quickPasteColumns.at(column) : true;
+
+        m_historyColumnChecks[column]->setChecked(historyVisible);
+        m_quickPasteColumnChecks[column]->setChecked(quickVisible);
+    }
+
+    m_previewLines->setValue(qBound(1, previewLineCount, 12));
+}
+
+void SettingsDialog::setShortcutStatusText(const QString &shortcutStatusText) {
     m_shortcutStatus->setText(shortcutStatusText);
 }
 
@@ -65,6 +150,27 @@ QKeySequence SettingsDialog::shortcut() const {
 
 bool SettingsDialog::startToTray() const {
     return m_startToTray->isChecked();
+}
+
+QVector<bool> SettingsDialog::columnsFromChecks(const QVector<QCheckBox *> &checks) const {
+    QVector<bool> visible;
+    visible.reserve(checks.size());
+    for (auto *check : checks) {
+        visible.push_back(check && check->isChecked());
+    }
+    return visible;
+}
+
+QVector<bool> SettingsDialog::historyColumns() const {
+    return columnsFromChecks(m_historyColumnChecks);
+}
+
+QVector<bool> SettingsDialog::quickPasteColumns() const {
+    return columnsFromChecks(m_quickPasteColumnChecks);
+}
+
+int SettingsDialog::previewLineCount() const {
+    return m_previewLines->value();
 }
 
 }  // namespace pastetry

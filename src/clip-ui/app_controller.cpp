@@ -9,6 +9,7 @@
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMessageBox>
+#include <QStringList>
 #include <QStyle>
 #include <QSystemTrayIcon>
 
@@ -18,6 +19,9 @@ namespace {
 constexpr const char *kSettingsShortcut = "hotkey/sequence";
 constexpr const char *kSettingsStartToTray = "ui/start_to_tray";
 constexpr const char *kSettingsPopupGeometry = "popup/last_geometry";
+constexpr const char *kSettingsHistoryColumns = "ui/history_columns";
+constexpr const char *kSettingsQuickColumns = "ui/quick_paste_columns";
+constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
 
 }  // namespace
 
@@ -81,8 +85,11 @@ bool AppController::initialize(QString *error) {
     if (!m_popupGeometry.isEmpty()) {
         m_quickPasteDialog.restoreGeometry(m_popupGeometry);
     }
+    applyViewSettings();
 
     setupTray();
+    m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
+                                       m_trayIcon->isVisible());
     applyShortcutSetting();
 
     if (!m_startToTray || !m_trayIcon || !m_trayIcon->isVisible()) {
@@ -146,20 +153,31 @@ void AppController::showQuickPastePopup() {
 
 void AppController::openSettings() {
     SettingsDialog dialog(&m_mainWindow);
-    dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText());
+    dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
+                     m_historyColumns, m_quickPasteColumns, m_previewLineCount);
 
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
+    auto applyFromDialog = [&]() {
+        m_shortcut = dialog.shortcut();
+        m_startToTray = dialog.startToTray();
+        m_historyColumns = normalizedColumns(dialog.historyColumns());
+        m_quickPasteColumns = normalizedColumns(dialog.quickPasteColumns());
+        m_previewLineCount = qBound(1, dialog.previewLineCount(), 12);
+
+        m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
+                                           m_trayIcon->isVisible());
+
+        applyViewSettings();
+        applyShortcutSetting();
+        saveSettings();
+
+        dialog.setShortcutStatusText(shortcutStatusText());
+    };
+
+    connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        applyFromDialog();
     }
-
-    m_shortcut = dialog.shortcut();
-    m_startToTray = dialog.startToTray();
-
-    m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
-                                       m_trayIcon->isVisible());
-
-    applyShortcutSetting();
-    saveSettings();
 }
 
 void AppController::handleQuitRequested() {
@@ -227,12 +245,23 @@ void AppController::loadSettings() {
     m_shortcut = QKeySequence::fromString(sequence);
 
     m_popupGeometry = m_settings.value(kSettingsPopupGeometry).toByteArray();
+    m_historyColumns = parseColumns(m_settings.value(kSettingsHistoryColumns).toString(),
+                                    m_historyColumns);
+    m_quickPasteColumns = parseColumns(m_settings.value(kSettingsQuickColumns).toString(),
+                                       m_quickPasteColumns);
+    m_previewLineCount = qBound(1, m_settings.value(kSettingsPreviewLines, 2).toInt(), 12);
+
+    m_historyColumns = normalizedColumns(m_historyColumns);
+    m_quickPasteColumns = normalizedColumns(m_quickPasteColumns);
 }
 
 void AppController::saveSettings() {
     m_settings.setValue(kSettingsStartToTray, m_startToTray);
     m_settings.setValue(kSettingsShortcut, m_shortcut.toString());
     m_settings.setValue(kSettingsPopupGeometry, m_popupGeometry);
+    m_settings.setValue(kSettingsHistoryColumns, serializeColumns(m_historyColumns));
+    m_settings.setValue(kSettingsQuickColumns, serializeColumns(m_quickPasteColumns));
+    m_settings.setValue(kSettingsPreviewLines, m_previewLineCount);
     m_settings.sync();
 }
 
@@ -247,6 +276,64 @@ void AppController::applyShortcutSetting() {
                                     QSystemTrayIcon::Warning, 2500);
         }
     }
+}
+
+void AppController::applyViewSettings() {
+    m_mainWindow.setVisibleColumns(m_historyColumns);
+    m_quickPasteDialog.setVisibleColumns(m_quickPasteColumns);
+    m_mainWindow.setPreviewLineCount(m_previewLineCount);
+    m_quickPasteDialog.setPreviewLineCount(m_previewLineCount);
+}
+
+QVector<bool> AppController::parseColumns(const QString &text,
+                                          const QVector<bool> &fallback) const {
+    if (text.trimmed().isEmpty()) {
+        return fallback;
+    }
+
+    const QStringList parts = text.split(',', Qt::SkipEmptyParts);
+    if (parts.size() != HistoryModel::ColumnCount) {
+        return fallback;
+    }
+
+    QVector<bool> columns;
+    columns.reserve(HistoryModel::ColumnCount);
+    for (const QString &part : parts) {
+        columns.push_back(part.trimmed() == QLatin1String("1"));
+    }
+
+    return columns;
+}
+
+QString AppController::serializeColumns(const QVector<bool> &columns) const {
+    QStringList parts;
+    for (int i = 0; i < HistoryModel::ColumnCount; ++i) {
+        const bool visible = i < columns.size() ? columns.at(i) : true;
+        parts.push_back(visible ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    return parts.join(',');
+}
+
+QVector<bool> AppController::normalizedColumns(const QVector<bool> &columns) const {
+    QVector<bool> normalized = columns;
+    if (normalized.size() < HistoryModel::ColumnCount) {
+        normalized.resize(HistoryModel::ColumnCount);
+    }
+    for (int i = 0; i < HistoryModel::ColumnCount; ++i) {
+        if (i >= columns.size()) {
+            normalized[i] = true;
+        }
+    }
+
+    bool anyVisible = false;
+    for (int i = 0; i < HistoryModel::ColumnCount; ++i) {
+        anyVisible = anyVisible || normalized.at(i);
+    }
+    if (!anyVisible) {
+        normalized[HistoryModel::PreviewColumn] = true;
+    }
+
+    return normalized;
 }
 
 QString AppController::shortcutStatusText() const {

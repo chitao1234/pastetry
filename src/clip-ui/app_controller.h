@@ -8,6 +8,7 @@
 
 #include <QObject>
 #include <QSettings>
+#include <QVector>
 
 class QAction;
 class QLocalServer;
@@ -37,6 +38,11 @@ private:
     void loadSettings();
     void saveSettings();
     void applyShortcutSetting();
+    void applyViewSettings();
+    QVector<bool> parseColumns(const QString &text,
+                               const QVector<bool> &fallback) const;
+    QString serializeColumns(const QVector<bool> &columns) const;
+    QVector<bool> normalizedColumns(const QVector<bool> &columns) const;
     QString shortcutStatusText() const;
 
     AppPaths m_paths;
@@ -49,6 +55,9 @@ private:
     QKeySequence m_shortcut;
     bool m_startToTray = true;
     QByteArray m_popupGeometry;
+    QVector<bool> m_historyColumns = {true, true, true, true};
+    QVector<bool> m_quickPasteColumns = {true, true, true, true};
+    int m_previewLineCount = 2;
     ShortcutRegistrationState m_shortcutState = ShortcutRegistrationState::Disabled;
 
     QSystemTrayIcon *m_trayIcon = nullptr;

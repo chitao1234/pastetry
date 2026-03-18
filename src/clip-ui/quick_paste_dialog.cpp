@@ -3,6 +3,7 @@
 #include <QCborArray>
 #include <QCborMap>
 #include <QCursor>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHideEvent>
 #include <QKeyEvent>
@@ -51,11 +52,18 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setAlternatingRowColors(true);
+    m_table->setWordWrap(true);
+    m_table->setTextElideMode(Qt::ElideRight);
     m_table->verticalHeader()->setVisible(false);
-    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::TimeColumn,
+                                                      QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PreviewColumn,
+                                                      QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::FormatsColumn,
+                                                      QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PinnedColumn,
+                                                      QHeaderView::ResizeToContents);
 
     layout->addWidget(m_searchEdit);
     layout->addWidget(m_table);
@@ -71,6 +79,22 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
             &QuickPasteDialog::activateCurrent);
     connect(m_table, &QTableView::doubleClicked, this,
             [this] { activateCurrent(); });
+
+    applyTableLayout();
+}
+
+void QuickPasteDialog::setVisibleColumns(const QVector<bool> &visibleColumns) {
+    if (visibleColumns.size() != HistoryModel::ColumnCount) {
+        return;
+    }
+
+    m_visibleColumns = visibleColumns;
+    applyTableLayout();
+}
+
+void QuickPasteDialog::setPreviewLineCount(int lineCount) {
+    m_previewLineCount = qBound(1, lineCount, 12);
+    applyTableLayout();
 }
 
 void QuickPasteDialog::openPopup() {
@@ -116,6 +140,15 @@ void QuickPasteDialog::keyPressEvent(QKeyEvent *event) {
 void QuickPasteDialog::hideEvent(QHideEvent *event) {
     QDialog::hideEvent(event);
     emit popupHidden();
+}
+
+bool QuickPasteDialog::event(QEvent *event) {
+    if (event->type() == QEvent::WindowDeactivate && isVisible()) {
+        hide();
+        return true;
+    }
+
+    return QDialog::event(event);
 }
 
 qint64 QuickPasteDialog::selectedEntryId() const {
@@ -173,6 +206,17 @@ void QuickPasteDialog::activateCurrent() {
 
     emit entryActivated();
     hide();
+}
+
+void QuickPasteDialog::applyTableLayout() {
+    for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
+        const bool visible = column < m_visibleColumns.size() ? m_visibleColumns.at(column) : true;
+        m_table->setColumnHidden(column, !visible);
+    }
+
+    const QFontMetrics fm(m_table->font());
+    const int rowHeight = fm.lineSpacing() * m_previewLineCount + 8;
+    m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
 }
 
 }  // namespace pastetry

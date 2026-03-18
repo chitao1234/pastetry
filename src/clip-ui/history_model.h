@@ -10,6 +10,14 @@ class HistoryModel : public QAbstractTableModel {
     Q_OBJECT
 
 public:
+    enum Column {
+        TimeColumn = 0,
+        PreviewColumn = 1,
+        FormatsColumn = 2,
+        PinnedColumn = 3,
+        ColumnCount = 4,
+    };
+
     explicit HistoryModel(QObject *parent = nullptr);
 
     int rowCount(const QModelIndex &parent = QModelIndex()) const override;

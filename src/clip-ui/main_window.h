@@ -5,6 +5,7 @@
 
 #include <QCloseEvent>
 #include <QMainWindow>
+#include <QVector>
 
 class QLineEdit;
 class QPushButton;
@@ -20,6 +21,8 @@ public:
     explicit MainWindow(IpcClient client, QWidget *parent = nullptr);
     void showAndActivate();
     void setCloseToTrayEnabled(bool enabled);
+    void setVisibleColumns(const QVector<bool> &visibleColumns);
+    void setPreviewLineCount(int lineCount);
 
 signals:
     void closeToTrayRequested();
@@ -37,6 +40,7 @@ private:
 
     void refresh(bool resetCursor);
     qint64 selectedEntryId() const;
+    void applyTableLayout();
 
     IpcClient m_client;
     HistoryModel *m_model = nullptr;
@@ -50,6 +54,8 @@ private:
     QTimer *m_searchTimer = nullptr;
     int m_cursor = 0;
     bool m_closeToTrayEnabled = true;
+    QVector<bool> m_visibleColumns = {true, true, true, true};
+    int m_previewLineCount = 2;
 };
 
 }  // namespace pastetry

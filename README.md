@@ -22,6 +22,10 @@ Cross-platform clipboard manager prototype with a daemon + Qt Widgets UI.
   - Start-minimized-to-tray lifecycle
   - Configurable global shortcut for quick-paste popup (disabled by default)
   - Quick-paste popup (keyboard-first search + Enter to activate)
+  - Quick-paste auto-hide when window loses focus
+  - Configurable visible columns for History and Quick Paste tables
+  - Configurable preview line count with uniform row heights
+  - Settings dialog supports `Apply` without closing
   - Search
   - Paginated list view
   - Activate (restore to clipboard)
@@ -70,6 +74,14 @@ Optional arguments for both binaries:
   - Windows: global shortcut supported.
   - Linux X11 (`xcb` session): global shortcut supported.
   - Linux Wayland: global shortcut registration is unavailable; tray actions still work.
+
+### Display preferences
+
+- Configure from tray menu: `Settings`.
+- You can choose per-column visibility separately for:
+  - History view
+  - Quick paste view
+- Preview text line count is configurable (1-12) and applied with fixed row height per entry.
 
 ## Notes
 

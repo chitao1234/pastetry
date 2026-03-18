@@ -32,6 +32,27 @@ QString htmlToPreview(const QString &html) {
     return plain.simplified();
 }
 
+QString normalizeTextPreview(const QString &text) {
+    QString normalized = text;
+    normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    normalized.replace(QChar('\r'), QChar('\n'));
+
+    const QStringList rawLines = normalized.split(QChar('\n'));
+    QStringList lines;
+    lines.reserve(rawLines.size());
+    for (const QString &line : rawLines) {
+        QString cleaned = line;
+        cleaned.replace(QRegularExpression("[\\t ]+"), QStringLiteral(" "));
+        lines.push_back(cleaned.trimmed());
+    }
+
+    while (!lines.isEmpty() && lines.last().isEmpty()) {
+        lines.removeLast();
+    }
+
+    return lines.join(QChar('\n'));
+}
+
 QCborMap toCbor(const EntrySummary &entry) {
     QCborMap map;
     map.insert(QStringLiteral("id"), entry.id);
@@ -130,7 +151,7 @@ CapturedEntry ClipboardDaemon::captureFromMimeData(const QMimeData *mimeData) co
 
     if (mimeData->hasText()) {
         const QString text = mimeData->text();
-        entry.preview = text.simplified().left(200);
+        entry.preview = normalizeTextPreview(text).left(2048);
         addFormat("text/plain", text.toUtf8());
     }
 

@@ -17,7 +17,7 @@ int HistoryModel::columnCount(const QModelIndex &parent) const {
     if (parent.isValid()) {
         return 0;
     }
-    return 4;
+    return ColumnCount;
 }
 
 QVariant HistoryModel::data(const QModelIndex &index, int role) const {
@@ -47,7 +47,7 @@ QVariant HistoryModel::data(const QModelIndex &index, int role) const {
         return entry.preview;
     }
 
-    if (role == Qt::TextAlignmentRole && index.column() >= 2) {
+    if (role == Qt::TextAlignmentRole && index.column() >= FormatsColumn) {
         return Qt::AlignCenter;
     }
 
@@ -61,13 +61,13 @@ QVariant HistoryModel::headerData(int section, Qt::Orientation orientation,
     }
 
     switch (section) {
-        case 0:
+        case TimeColumn:
             return "Time";
-        case 1:
+        case PreviewColumn:
             return "Preview";
-        case 2:
+        case FormatsColumn:
             return "Formats";
-        case 3:
+        case PinnedColumn:
             return "Pinned";
         default:
             return {};
