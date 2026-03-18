@@ -6,11 +6,21 @@
 #include <QImage>
 #include <QPainter>
 #include <QPixmap>
+#include <QRegularExpression>
 #include <QStyle>
 #include <QStyleOptionViewItem>
 #include <QTextLayout>
 
 namespace pastetry {
+namespace {
+
+bool isImagePlaceholderText(const QString &text) {
+    static const QRegularExpression pattern(
+        QStringLiteral("^\\[Image\\]\\s+\\d+x\\d+$"));
+    return pattern.match(text.trimmed()).hasMatch();
+}
+
+}  // namespace
 
 PreviewTextDelegate::PreviewTextDelegate(IpcClient client, QObject *parent)
     : QStyledItemDelegate(parent), m_client(std::move(client)) {}
@@ -137,6 +147,7 @@ void PreviewTextDelegate::paint(QPainter *painter,
     }
 
     const QString imageBlobHash = index.data(HistoryModel::ImageBlobHashRole).toString();
+    bool suppressImagePlaceholderText = false;
     if (!imageBlobHash.isEmpty()) {
         const int thumbSide = qMax(16, textRect.height() - 4);
         const QRect thumbRect(textRect.left(),
@@ -171,6 +182,12 @@ void PreviewTextDelegate::paint(QPainter *painter,
         if (textRect.width() <= 0) {
             return;
         }
+
+        suppressImagePlaceholderText = isImagePlaceholderText(rawText);
+    }
+
+    if (suppressImagePlaceholderText) {
+        return;
     }
 
     QStringList lines = wrappedLines(rawText, opt.font, textRect.width());
