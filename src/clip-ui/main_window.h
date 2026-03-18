@@ -3,6 +3,7 @@
 #include "clip-ui/history_model.h"
 #include "common/ipc_client.h"
 
+#include <QCloseEvent>
 #include <QMainWindow>
 
 class QLineEdit;
@@ -17,6 +18,14 @@ class MainWindow : public QMainWindow {
 
 public:
     explicit MainWindow(IpcClient client, QWidget *parent = nullptr);
+    void showAndActivate();
+    void setCloseToTrayEnabled(bool enabled);
+
+signals:
+    void closeToTrayRequested();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     void loadInitial();
@@ -40,6 +49,7 @@ private:
     QPushButton *m_clearButton = nullptr;
     QTimer *m_searchTimer = nullptr;
     int m_cursor = 0;
+    bool m_closeToTrayEnabled = true;
 };
 
 }  // namespace pastetry

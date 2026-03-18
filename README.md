@@ -17,6 +17,11 @@ Cross-platform clipboard manager prototype with a daemon + Qt Widgets UI.
 - Blob store for large/rich payloads with deduplication and reference counting.
 - Local IPC over `QLocalServer`/`QLocalSocket` with CBOR-framed messages.
 - Qt Widgets UI (`pastetry-clip-ui`) with:
+  - Tray icon + tray menu (`Open History`, `Open Quick Paste`, `Settings`, `Quit`)
+  - Single-instance behavior (second launch toggles quick-paste popup in existing instance)
+  - Start-minimized-to-tray lifecycle
+  - Configurable global shortcut for quick-paste popup (disabled by default)
+  - Quick-paste popup (keyboard-first search + Enter to activate)
   - Search
   - Paginated list view
   - Activate (restore to clipboard)
@@ -56,6 +61,15 @@ Optional arguments for both binaries:
 
 - `--data-dir <dir>`
 - `--socket <name>`
+
+### Quick-paste shortcut
+
+- Configure from tray menu: `Settings`.
+- Default is disabled (no global shortcut).
+- Current backend targets:
+  - Windows: global shortcut supported.
+  - Linux X11 (`xcb` session): global shortcut supported.
+  - Linux Wayland: global shortcut registration is unavailable; tray actions still work.
 
 ## Notes
 

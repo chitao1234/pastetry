@@ -1,11 +1,11 @@
-#include "clip-ui/main_window.h"
+#include "clip-ui/app_controller.h"
 
 #include "common/app_paths.h"
-#include "common/ipc_client.h"
 
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QMessageBox>
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
@@ -27,9 +27,18 @@ int main(int argc, char **argv) {
     const auto paths = pastetry::resolveAppPaths(parser.value(dataDirOpt),
                                                  parser.value(socketOpt));
 
-    pastetry::IpcClient client(paths.socketName);
-    pastetry::MainWindow window(std::move(client));
-    window.show();
+    QApplication::setQuitOnLastWindowClosed(false);
 
-    return app.exec();
+    pastetry::AppController controller(paths);
+    QString error;
+    const bool shouldRun = controller.initialize(&error);
+    if (!shouldRun) {
+        if (!error.isEmpty()) {
+            QMessageBox::critical(nullptr, QStringLiteral("Pastetry startup failed"), error);
+            return 1;
+        }
+        return 0;
+    }
+
+    return QApplication::exec();
 }

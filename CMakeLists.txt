@@ -35,9 +35,13 @@ add_executable(pastetry-clipd
 target_link_libraries(pastetry-clipd PRIVATE pastetry_common)
 
 add_executable(pastetry-clip-ui
+    src/clip-ui/app_controller.cpp
+    src/clip-ui/global_shortcut_service.cpp
     src/clip-ui/main.cpp
     src/clip-ui/history_model.cpp
     src/clip-ui/main_window.cpp
+    src/clip-ui/quick_paste_dialog.cpp
+    src/clip-ui/settings_dialog.cpp
 )
 
 target_link_libraries(pastetry-clip-ui
@@ -45,6 +49,12 @@ target_link_libraries(pastetry-clip-ui
         pastetry_common
         Qt6::Widgets
 )
+
+if(UNIX AND NOT APPLE)
+    find_package(X11 REQUIRED)
+    target_include_directories(pastetry-clip-ui PRIVATE ${X11_INCLUDE_DIR})
+    target_link_libraries(pastetry-clip-ui PRIVATE ${X11_LIBRARIES})
+endif()
 
 enable_testing()
 add_executable(repository_tests

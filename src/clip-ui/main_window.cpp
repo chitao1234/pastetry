@@ -96,6 +96,16 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     loadInitial();
 }
 
+void MainWindow::showAndActivate() {
+    show();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::setCloseToTrayEnabled(bool enabled) {
+    m_closeToTrayEnabled = enabled;
+}
+
 qint64 MainWindow::selectedEntryId() const {
     const auto indexes = m_table->selectionModel()->selectedRows();
     if (indexes.isEmpty()) {
@@ -225,6 +235,17 @@ void MainWindow::clearHistory() {
     }
 
     refresh(true);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (m_closeToTrayEnabled) {
+        event->ignore();
+        hide();
+        emit closeToTrayRequested();
+        return;
+    }
+
+    QMainWindow::closeEvent(event);
 }
 
 }  // namespace pastetry
