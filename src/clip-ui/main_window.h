@@ -14,6 +14,8 @@ class QTimer;
 
 namespace pastetry {
 
+class PreviewTextDelegate;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -46,6 +48,7 @@ private:
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QTableView *m_table = nullptr;
+    PreviewTextDelegate *m_previewDelegate = nullptr;
     QPushButton *m_loadMoreButton = nullptr;
     QPushButton *m_activateButton = nullptr;
     QPushButton *m_pinButton = nullptr;

@@ -1,5 +1,7 @@
 #include "clip-ui/quick_paste_dialog.h"
 
+#include "clip-ui/preview_text_delegate.h"
+
 #include <QCborArray>
 #include <QCborMap>
 #include <QCursor>
@@ -8,6 +10,7 @@
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -48,7 +51,9 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
 
     m_table = new QTableView(this);
     m_model = new HistoryModel(this);
+    m_previewDelegate = new PreviewTextDelegate(m_table);
     m_table->setModel(m_model);
+    m_table->setItemDelegateForColumn(HistoryModel::PreviewColumn, m_previewDelegate);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setAlternatingRowColors(true);
@@ -214,8 +219,17 @@ void QuickPasteDialog::applyTableLayout() {
         m_table->setColumnHidden(column, !visible);
     }
 
-    const QFontMetrics fm(m_table->font());
-    const int rowHeight = fm.lineSpacing() * m_previewLineCount + 8;
+    m_previewDelegate->setMaxLines(m_previewLineCount);
+    QModelIndex previewIndex;
+    if (m_model->rowCount() > 0) {
+        previewIndex = m_model->index(0, HistoryModel::PreviewColumn);
+    }
+    QStyleOptionViewItem option;
+    option.initFrom(m_table);
+    option.font = m_table->font();
+    option.rect = QRect(0, 0, m_table->viewport()->width(), m_table->fontMetrics().height());
+    const int rowHeight =
+        m_previewDelegate->sizeHint(option, previewIndex).height();
     m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
 }
 

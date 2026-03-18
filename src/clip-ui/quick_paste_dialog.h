@@ -13,6 +13,8 @@ class QHideEvent;
 
 namespace pastetry {
 
+class PreviewTextDelegate;
+
 class QuickPasteDialog : public QDialog {
     Q_OBJECT
 
@@ -45,6 +47,7 @@ private:
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QTableView *m_table = nullptr;
+    PreviewTextDelegate *m_previewDelegate = nullptr;
     QTimer *m_searchTimer = nullptr;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;

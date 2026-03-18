@@ -40,6 +40,7 @@ add_executable(pastetry-clip-ui
     src/clip-ui/main.cpp
     src/clip-ui/history_model.cpp
     src/clip-ui/main_window.cpp
+    src/clip-ui/preview_text_delegate.cpp
     src/clip-ui/quick_paste_dialog.cpp
     src/clip-ui/settings_dialog.cpp
 )

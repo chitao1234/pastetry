@@ -82,6 +82,7 @@ Optional arguments for both binaries:
   - History view
   - Quick paste view
 - Preview text line count is configurable (1-12) and applied with fixed row height per entry.
+- Preview text uses multiline rendering with last-line ellipsis when content exceeds visible lines.
 
 ## Notes
 
