@@ -1,5 +1,6 @@
 #include "clip-ui/app_controller.h"
 
+#include "clip-ui/clipboard_inspector_dialog.h"
 #include "clip-ui/settings_dialog.h"
 
 #include <QAction>
@@ -175,6 +176,8 @@ void AppController::setupTray() {
 
     m_openHistoryAction = menu->addAction(QStringLiteral("Open History"));
     m_openQuickPasteAction = menu->addAction(QStringLiteral("Open Quick Paste"));
+    m_openClipboardInspectorAction =
+        menu->addAction(QStringLiteral("Clipboard Inspector"));
     menu->addSeparator();
     m_openSettingsAction = menu->addAction(QStringLiteral("Settings"));
     menu->addSeparator();
@@ -184,6 +187,8 @@ void AppController::setupTray() {
             &AppController::showMainWindow);
     connect(m_openQuickPasteAction, &QAction::triggered, this,
             &AppController::showQuickPastePopup);
+    connect(m_openClipboardInspectorAction, &QAction::triggered, this,
+            &AppController::openClipboardInspector);
     connect(m_openSettingsAction, &QAction::triggered, this,
             &AppController::openSettings);
     connect(m_quitAction, &QAction::triggered, this,
@@ -215,6 +220,17 @@ void AppController::showMainWindow() {
 
 void AppController::showQuickPastePopup() {
     m_quickPasteDialog.togglePopup();
+}
+
+void AppController::openClipboardInspector() {
+    if (!m_clipboardInspectorDialog) {
+        m_clipboardInspectorDialog = new ClipboardInspectorDialog(&m_mainWindow);
+    }
+
+    m_clipboardInspectorDialog->show();
+    m_clipboardInspectorDialog->raise();
+    m_clipboardInspectorDialog->activateWindow();
+    m_clipboardInspectorDialog->refresh();
 }
 
 void AppController::openSettings() {

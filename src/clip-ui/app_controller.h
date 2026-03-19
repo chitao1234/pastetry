@@ -17,6 +17,8 @@ class QSystemTrayIcon;
 
 namespace pastetry {
 
+class ClipboardInspectorDialog;
+
 class AppController : public QObject {
     Q_OBJECT
 
@@ -27,6 +29,7 @@ public:
 private slots:
     void showMainWindow();
     void showQuickPastePopup();
+    void openClipboardInspector();
     void openSettings();
     void handleQuitRequested();
 
@@ -72,8 +75,10 @@ private:
     QSystemTrayIcon *m_trayIcon = nullptr;
     QAction *m_openHistoryAction = nullptr;
     QAction *m_openQuickPasteAction = nullptr;
+    QAction *m_openClipboardInspectorAction = nullptr;
     QAction *m_openSettingsAction = nullptr;
     QAction *m_quitAction = nullptr;
+    ClipboardInspectorDialog *m_clipboardInspectorDialog = nullptr;
 
     QLocalServer *m_singleInstanceServer = nullptr;
     QString m_singleInstanceName;
