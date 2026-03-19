@@ -45,9 +45,12 @@ public:
     int previewLineCount() const;
     bool regexStrictFullScanEnabled() const;
     CapturePolicy capturePolicy() const;
+    bool hasPendingChanges() const;
+    void setApplyInProgress(bool inProgress);
 
 signals:
     void applyRequested();
+    void acceptRequested();
     void shortcutsEdited();
 
 private:
@@ -93,6 +96,7 @@ private:
     CapturePolicy m_savedCapturePolicy;
     bool m_hasShortcutConflict = false;
     bool m_loadingValues = false;
+    bool m_applyInProgress = false;
 };
 
 }  // namespace pastetry

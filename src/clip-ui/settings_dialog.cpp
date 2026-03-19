@@ -367,7 +367,6 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
                 [this] { refreshApplyButtonState(); });
     }
 
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     m_applyButton = buttons->button(QDialogButtonBox::Apply);
@@ -375,6 +374,9 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     if (m_applyButton) {
         connect(m_applyButton, &QAbstractButton::clicked, this,
                 &SettingsDialog::applyRequested);
+    }
+    if (m_okButton) {
+        connect(m_okButton, &QAbstractButton::clicked, this, &SettingsDialog::acceptRequested);
     }
 
     refreshApplyButtonState();
@@ -593,6 +595,16 @@ CapturePolicy SettingsDialog::capturePolicy() const {
     return policy;
 }
 
+bool SettingsDialog::hasPendingChanges() const {
+    return hasUnsavedChanges();
+}
+
+void SettingsDialog::setApplyInProgress(bool inProgress) {
+    m_applyInProgress = inProgress;
+    setEnabled(!inProgress);
+    refreshApplyButtonState();
+}
+
 bool SettingsDialog::hasUnsavedChanges() const {
     const CapturePolicy currentPolicy = capturePolicy();
     const bool capturePolicyChanged =
@@ -614,12 +626,13 @@ bool SettingsDialog::hasUnsavedChanges() const {
 void SettingsDialog::refreshApplyButtonState() {
     if (m_applyButton) {
         const bool applyEnabled =
-            !m_loadingValues && !m_hasShortcutConflict && hasUnsavedChanges();
+            !m_loadingValues && !m_hasShortcutConflict && !m_applyInProgress &&
+            hasUnsavedChanges();
         m_applyButton->setEnabled(applyEnabled);
     }
 
     if (m_okButton) {
-        m_okButton->setEnabled(!m_hasShortcutConflict);
+        m_okButton->setEnabled(!m_hasShortcutConflict && !m_applyInProgress);
     }
 }
 

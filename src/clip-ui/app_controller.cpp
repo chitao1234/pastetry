@@ -4,6 +4,7 @@
 #include "clip-ui/settings_dialog.h"
 
 #include <QAction>
+#include <QAbstractSocket>
 #include <QApplication>
 #include <QCborArray>
 #include <QCborMap>
@@ -14,6 +15,7 @@
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QStyle>
 #include <QSystemTrayIcon>
 
@@ -48,6 +50,76 @@ constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
 constexpr const char *kSettingsSearchMode = "search/mode";
 constexpr const char *kSettingsRegexStrict = "search/regex_strict_full_scan";
 constexpr int kChordTimeoutMs = 1200;
+
+QStringList normalizedAllowlistPatterns(const QStringList &patterns) {
+    QStringList normalized;
+    normalized.reserve(patterns.size());
+    for (const QString &raw : patterns) {
+        const QString trimmed = raw.trimmed();
+        if (!trimmed.isEmpty()) {
+            normalized.push_back(trimmed);
+        }
+    }
+    return normalized;
+}
+
+bool capturePolicyEquals(const CapturePolicy &lhs, const CapturePolicy &rhs) {
+    return lhs.profile == rhs.profile &&
+           lhs.maxFormatBytes == rhs.maxFormatBytes &&
+           lhs.maxEntryBytes == rhs.maxEntryBytes &&
+           normalizedAllowlistPatterns(lhs.customAllowlistPatterns) ==
+               normalizedAllowlistPatterns(rhs.customAllowlistPatterns);
+}
+
+bool parseCapturePolicyFromCborResult(const QCborMap &result, CapturePolicy *policy,
+                                      QString *error) {
+    if (!policy) {
+        if (error) {
+            *error = QStringLiteral("policy output is required");
+        }
+        return false;
+    }
+
+    const QString profileText = result.value(QStringLiteral("profile")).toString();
+    const qint64 maxFormatBytes = result.value(QStringLiteral("max_format_bytes")).toInteger();
+    const qint64 maxEntryBytes = result.value(QStringLiteral("max_entry_bytes")).toInteger();
+    if (profileText.trimmed().isEmpty() || maxFormatBytes <= 0 || maxEntryBytes <= 0) {
+        if (error) {
+            *error = QStringLiteral("Invalid capture policy payload");
+        }
+        return false;
+    }
+
+    CapturePolicy loaded;
+    loaded.profile = captureProfileFromString(profileText);
+    loaded.maxFormatBytes = maxFormatBytes;
+    loaded.maxEntryBytes = maxEntryBytes;
+
+    const QCborValue allowlistValue = result.value(QStringLiteral("custom_allowlist"));
+    if (allowlistValue.isArray()) {
+        for (const QCborValue &item : allowlistValue.toArray()) {
+            const QString pattern = item.toString().trimmed();
+            if (!pattern.isEmpty()) {
+                loaded.customAllowlistPatterns.push_back(pattern);
+            }
+        }
+    } else if (allowlistValue.isString()) {
+        for (const QString &line :
+             allowlistValue.toString().split('\n', Qt::SkipEmptyParts)) {
+            const QString pattern = line.trimmed();
+            if (!pattern.isEmpty()) {
+                loaded.customAllowlistPatterns.push_back(pattern);
+            }
+        }
+    }
+
+    loaded.customAllowlistPatterns = normalizedAllowlistPatterns(loaded.customAllowlistPatterns);
+    *policy = loaded;
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
 
 QString shortcutKey(const QKeySequence &shortcut) {
     return shortcut.toString(QKeySequence::PortableText).trimmed();
@@ -195,53 +267,6 @@ QString bindingSummary(const ShortcutBindingConfig &binding) {
              binding.chordSecondSequence.toString());
 }
 
-QString probeShortcutStatus(const ShortcutBindingConfig &binding,
-                           GlobalShortcutService *probeService) {
-    if (!probeService) {
-        return QStringLiteral("Unavailable: probe service missing");
-    }
-
-    if (binding.mode == ShortcutBindingMode::Disabled) {
-        return QStringLiteral("Disabled (no shortcut configured)");
-    }
-
-    if (binding.mode == ShortcutBindingMode::Direct) {
-        const ShortcutRegistrationState state =
-            probeService->registerShortcut(binding.directSequence, true);
-        const QString detail = probeService->lastError();
-        probeService->unregisterShortcut();
-        if (state == ShortcutRegistrationState::Registered) {
-            return QStringLiteral("Available: %1")
-                .arg(binding.directSequence.toString());
-        }
-        return stateDetailText(state, detail);
-    }
-
-    const ShortcutRegistrationState firstState =
-        probeService->registerShortcut(binding.chordFirstSequence, true);
-    const QString firstDetail = probeService->lastError();
-    probeService->unregisterShortcut();
-
-    const ShortcutRegistrationState secondState =
-        probeService->registerShortcut(binding.chordSecondSequence, false);
-    const QString secondDetail = probeService->lastError();
-    probeService->unregisterShortcut();
-
-    if (firstState == ShortcutRegistrationState::Registered &&
-        secondState == ShortcutRegistrationState::Registered) {
-        return QStringLiteral("Available: %1 then %2")
-            .arg(binding.chordFirstSequence.toString(),
-                 binding.chordSecondSequence.toString());
-    }
-
-    if (firstState != ShortcutRegistrationState::Registered) {
-        return QStringLiteral("Step 1 unavailable: %1")
-            .arg(stateDetailText(firstState, firstDetail));
-    }
-    return QStringLiteral("Step 2 unavailable: %1")
-        .arg(stateDetailText(secondState, secondDetail));
-}
-
 #ifdef Q_OS_WIN
 bool qtKeyToWindowsVk(int qtKey, UINT *outVk) {
     if (!outVk) {
@@ -379,9 +404,9 @@ bool qtKeyToX11KeySym(int qtKey, KeySym *outSym) {
 AppController::AppController(AppPaths paths, QObject *parent)
     : QObject(parent),
       m_paths(std::move(paths)),
-      m_client(m_paths.socketName),
-      m_mainWindow(m_client),
-      m_quickPasteDialog(m_client),
+      m_ipcRunner(m_paths.socketName, this),
+      m_mainWindow(&m_ipcRunner),
+      m_quickPasteDialog(&m_ipcRunner),
       m_settings(QStringLiteral("pastetry"), QStringLiteral("pastetry")),
       m_singleInstanceName(QStringLiteral("pastetry.clip-ui.instance.v1")) {
     m_mainWindow.setCloseToTrayEnabled(true);
@@ -455,12 +480,46 @@ AppController::AppController(AppPaths paths, QObject *parent)
 }
 
 bool AppController::initialize(QString *error) {
-    if (notifyExistingInstance()) {
+    QString handoffError;
+    if (notifyExistingInstance(300, &handoffError)) {
         return false;
     }
 
     if (!startSingleInstanceServer(error)) {
-        return false;
+        if (!m_singleInstanceServer ||
+            m_singleInstanceServer->serverError() != QAbstractSocket::AddressInUseError) {
+            return false;
+        }
+
+        handoffError.clear();
+        if (notifyExistingInstance(300, &handoffError)) {
+            return false;
+        }
+
+        while (true) {
+            const InstanceTakeoverDecision decision =
+                promptSingleInstanceTakeover(handoffError);
+            if (decision == InstanceTakeoverDecision::Exit) {
+                if (error) {
+                    error->clear();
+                }
+                return false;
+            }
+
+            if (decision == InstanceTakeoverDecision::RetryHandoff) {
+                handoffError.clear();
+                if (notifyExistingInstance(300, &handoffError)) {
+                    return false;
+                }
+                continue;
+            }
+
+            QLocalServer::removeServer(m_singleInstanceName);
+            if (!startSingleInstanceServer(error)) {
+                return false;
+            }
+            break;
+        }
     }
 
     loadSettings();
@@ -474,14 +533,26 @@ bool AppController::initialize(QString *error) {
                                        m_trayIcon->isVisible());
     applyShortcutSettings(true);
     checkDaemonConnectivity(true);
+    m_ipcRunner.request(
+        QStringLiteral("GetCapturePolicy"), QCborMap{}, 1800, this,
+        [this](const QCborMap &result, const QString &requestError) {
+            if (!requestError.trimmed().isEmpty()) {
+                qWarning().noquote()
+                    << QStringLiteral("Failed to load capture policy from daemon: %1")
+                           .arg(requestError);
+                return;
+            }
 
-    QString capturePolicyError;
-    if (!loadCapturePolicyFromDaemon(&capturePolicyError) &&
-        !capturePolicyError.trimmed().isEmpty()) {
-        qWarning().noquote()
-            << QStringLiteral("Failed to load capture policy from daemon: %1")
-                   .arg(capturePolicyError);
-    }
+            CapturePolicy loaded;
+            QString parseError;
+            if (!parseCapturePolicyFromCborResult(result, &loaded, &parseError)) {
+                qWarning().noquote()
+                    << QStringLiteral("Failed to load capture policy from daemon: %1")
+                           .arg(parseError);
+                return;
+            }
+            m_capturePolicy = loaded;
+        });
     m_daemonHealthTimer.start();
 
     if (!m_startToTray || !m_trayIcon || !m_trayIcon->isVisible()) {
@@ -550,22 +621,12 @@ void AppController::showQuickPastePopup() {
 void AppController::openClipboardInspector() {
     if (!m_clipboardInspectorDialog) {
         m_clipboardInspectorDialog =
-            new ClipboardInspectorDialog(m_client, &m_mainWindow);
+            new ClipboardInspectorDialog(&m_ipcRunner, &m_mainWindow);
     }
     m_clipboardInspectorDialog->inspectClipboard();
 }
 
 void AppController::openSettings() {
-    QString policyLoadError;
-    if (!loadCapturePolicyFromDaemon(&policyLoadError) &&
-        !policyLoadError.trimmed().isEmpty()) {
-        QMessageBox::warning(
-            &m_mainWindow, QStringLiteral("Capture policy unavailable"),
-            QStringLiteral("Could not load rich-format capture policy from daemon.\n\n"
-                           "Reason: %1")
-                .arg(policyLoadError));
-    }
-
     SettingsDialog dialog(&m_mainWindow);
 
     auto currentStatusTexts = [&]() {
@@ -596,12 +657,41 @@ void AppController::openSettings() {
                      m_quickPasteColumns, m_previewLineCount, m_regexStrictFullScan,
                      m_capturePolicy);
 
-    GlobalShortcutService probeShortcutService(&dialog, 9999);
+    m_ipcRunner.request(
+        QStringLiteral("GetCapturePolicy"), QCborMap{}, 1800, &dialog,
+        [&dialog, this, currentStatusTexts](const QCborMap &result, const QString &error) {
+            if (!error.trimmed().isEmpty()) {
+                QMessageBox::warning(
+                    &dialog, QStringLiteral("Capture policy unavailable"),
+                    QStringLiteral("Could not load rich-format capture policy from daemon.\n\n"
+                                   "Reason: %1")
+                        .arg(error));
+                return;
+            }
+
+            CapturePolicy loaded;
+            QString parseError;
+            if (!parseCapturePolicyFromCborResult(result, &loaded, &parseError)) {
+                QMessageBox::warning(&dialog, QStringLiteral("Capture policy unavailable"),
+                                     parseError);
+                return;
+            }
+
+            m_capturePolicy = loaded;
+            if (!dialog.hasPendingChanges()) {
+                dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
+                                 m_startToTray, false, QString(), m_historyColumns,
+                                 m_quickPasteColumns, m_previewLineCount,
+                                 m_regexStrictFullScan, m_capturePolicy);
+            }
+        });
+
     auto updateShortcutAvailability = [&]() {
         const QHash<QString, ShortcutBindingConfig> candidateBindings =
             dialog.shortcutBindings();
         const ShortcutValidationResult validation =
             validateShortcutBindings(candidateBindings);
+        const QHash<QString, QString> activeStatuses = currentStatusTexts();
 
         QHash<QString, QString> statuses;
         for (const auto &spec : allShortcutActionSpecs()) {
@@ -610,7 +700,19 @@ void AppController::openSettings() {
                 statuses.insert(spec.id, validation.actionErrors.value(spec.id));
                 continue;
             }
-            statuses.insert(spec.id, probeShortcutStatus(binding, &probeShortcutService));
+
+            if (binding.mode == ShortcutBindingMode::Disabled) {
+                statuses.insert(spec.id, QStringLiteral("Disabled (no shortcut configured)"));
+                continue;
+            }
+
+            const ShortcutBindingConfig activeBinding = m_shortcutBindings.value(spec.id);
+            if (binding == activeBinding) {
+                statuses.insert(spec.id, activeStatuses.value(spec.id));
+                continue;
+            }
+
+            statuses.insert(spec.id, QStringLiteral("Pending apply: %1").arg(bindingSummary(binding)));
         }
 
         dialog.setShortcutStatusTexts(statuses);
@@ -618,7 +720,11 @@ void AppController::openSettings() {
                                         validation.conflictMessage);
     };
 
-    auto applyFromDialog = [&]() {
+    auto applyFromDialog = [&](bool closeOnSuccess) {
+        if (dialog.isModal() && !dialog.isVisible()) {
+            return;
+        }
+
         const ShortcutValidationResult validation =
             validateShortcutBindings(dialog.shortcutBindings());
         if (!validation.actionErrors.isEmpty()) {
@@ -630,48 +736,161 @@ void AppController::openSettings() {
             return;
         }
 
-        const CapturePolicy requestedPolicy = dialog.capturePolicy();
-        QString policyApplyError;
-        if (!applyCapturePolicyToDaemon(requestedPolicy, &policyApplyError)) {
-            QMessageBox::warning(
-                &dialog, QStringLiteral("Capture policy apply failed"),
-                QStringLiteral("Failed to update daemon capture policy.\n\nReason: %1")
-                    .arg(policyApplyError.isEmpty()
-                             ? QStringLiteral("Unknown error")
-                             : policyApplyError));
+        const QHash<QString, ShortcutBindingConfig> requestedShortcuts = dialog.shortcutBindings();
+        const QKeySequence requestedAutoPasteKey = dialog.autoPasteKey();
+        const bool requestedStartToTray = dialog.startToTray();
+        const QVector<bool> requestedHistoryColumns =
+            normalizedColumns(dialog.historyColumns());
+        const QVector<bool> requestedQuickPasteColumns =
+            normalizedColumns(dialog.quickPasteColumns());
+        const int requestedPreviewLineCount = qBound(1, dialog.previewLineCount(), 12);
+        const bool requestedRegexStrict = dialog.regexStrictFullScanEnabled();
+        CapturePolicy requestedPolicy = dialog.capturePolicy();
+        requestedPolicy.customAllowlistPatterns =
+            normalizedAllowlistPatterns(requestedPolicy.customAllowlistPatterns);
+
+        const bool shortcutsChanged = requestedShortcuts != m_shortcutBindings;
+        const bool autoPasteChanged = requestedAutoPasteKey != m_autoPasteKey;
+        const bool startToTrayChanged = requestedStartToTray != m_startToTray;
+        const bool historyColumnsChanged = requestedHistoryColumns != m_historyColumns;
+        const bool quickColumnsChanged = requestedQuickPasteColumns != m_quickPasteColumns;
+        const bool previewLineCountChanged = requestedPreviewLineCount != m_previewLineCount;
+        const bool regexStrictChanged = requestedRegexStrict != m_regexStrictFullScan;
+        const bool capturePolicyChanged = !capturePolicyEquals(requestedPolicy, m_capturePolicy);
+
+        const bool anyChanged = shortcutsChanged || autoPasteChanged || startToTrayChanged ||
+                                historyColumnsChanged || quickColumnsChanged ||
+                                previewLineCountChanged || regexStrictChanged ||
+                                capturePolicyChanged;
+        if (!anyChanged) {
+            if (closeOnSuccess) {
+                dialog.accept();
+            }
             return;
         }
 
-        m_shortcutBindings = dialog.shortcutBindings();
-        m_autoPasteKey = dialog.autoPasteKey();
-        m_startToTray = dialog.startToTray();
-        m_historyColumns = normalizedColumns(dialog.historyColumns());
-        m_quickPasteColumns = normalizedColumns(dialog.quickPasteColumns());
-        m_previewLineCount = qBound(1, dialog.previewLineCount(), 12);
-        m_regexStrictFullScan = dialog.regexStrictFullScanEnabled();
+        auto commitLocalChanges = [&, requestedShortcuts, requestedAutoPasteKey,
+                                   requestedStartToTray, requestedHistoryColumns,
+                                   requestedQuickPasteColumns, requestedPreviewLineCount,
+                                   requestedRegexStrict, closeOnSuccess,
+                                   shortcutsChanged, autoPasteChanged, startToTrayChanged,
+                                   historyColumnsChanged, quickColumnsChanged,
+                                   previewLineCountChanged, regexStrictChanged](
+                                      const CapturePolicy &effectivePolicy) {
+            if (shortcutsChanged) {
+                m_shortcutBindings = requestedShortcuts;
+            }
+            if (autoPasteChanged) {
+                m_autoPasteKey = requestedAutoPasteKey;
+            }
+            if (startToTrayChanged) {
+                m_startToTray = requestedStartToTray;
+            }
+            if (historyColumnsChanged) {
+                m_historyColumns = requestedHistoryColumns;
+            }
+            if (quickColumnsChanged) {
+                m_quickPasteColumns = requestedQuickPasteColumns;
+            }
+            if (previewLineCountChanged) {
+                m_previewLineCount = requestedPreviewLineCount;
+            }
+            if (regexStrictChanged) {
+                m_regexStrictFullScan = requestedRegexStrict;
+            }
+            m_capturePolicy = effectivePolicy;
 
-        m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
-                                           m_trayIcon->isVisible());
+            if (startToTrayChanged) {
+                m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
+                                                   m_trayIcon->isVisible());
+            }
 
-        applyViewSettings();
-        applyShortcutSettings(true);
-        saveSettings();
+            if (historyColumnsChanged || quickColumnsChanged || previewLineCountChanged ||
+                regexStrictChanged) {
+                applyViewSettings();
+            }
+            if (shortcutsChanged || autoPasteChanged) {
+                applyShortcutSettings(true);
+            }
+            saveSettings();
 
-        dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
-                         m_startToTray, false, QString(), m_historyColumns,
-                         m_quickPasteColumns, m_previewLineCount,
-                         m_regexStrictFullScan, m_capturePolicy);
-        updateShortcutAvailability();
+            dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
+                             m_startToTray, false, QString(), m_historyColumns,
+                             m_quickPasteColumns, m_previewLineCount,
+                             m_regexStrictFullScan, m_capturePolicy);
+            updateShortcutAvailability();
+            if (closeOnSuccess) {
+                dialog.accept();
+            }
+        };
+
+        if (!capturePolicyChanged) {
+            commitLocalChanges(m_capturePolicy);
+            return;
+        }
+
+        QCborArray customAllowlist;
+        for (const QString &pattern : requestedPolicy.customAllowlistPatterns) {
+            customAllowlist.append(pattern);
+        }
+
+        QCborMap params;
+        params.insert(QStringLiteral("profile"), captureProfileToString(requestedPolicy.profile));
+        params.insert(QStringLiteral("custom_allowlist"), customAllowlist);
+        params.insert(QStringLiteral("max_format_bytes"), requestedPolicy.maxFormatBytes);
+        params.insert(QStringLiteral("max_entry_bytes"), requestedPolicy.maxEntryBytes);
+
+        dialog.setApplyInProgress(true);
+        m_ipcRunner.request(
+            QStringLiteral("SetCapturePolicy"), params, 2500, &dialog,
+            [this, &dialog, commitLocalChanges](const QCborMap &, const QString &setError) {
+                if (!setError.isEmpty()) {
+                    dialog.setApplyInProgress(false);
+                    QMessageBox::warning(
+                        &dialog, QStringLiteral("Capture policy apply failed"),
+                        QStringLiteral("Failed to update daemon capture policy.\n\nReason: %1")
+                            .arg(setError));
+                    return;
+                }
+
+                m_ipcRunner.request(
+                    QStringLiteral("GetCapturePolicy"), QCborMap{}, 1800, &dialog,
+                    [this, &dialog, commitLocalChanges](const QCborMap &result,
+                                                        const QString &getError) {
+                        dialog.setApplyInProgress(false);
+                        if (!getError.isEmpty()) {
+                            QMessageBox::warning(
+                                &dialog, QStringLiteral("Capture policy apply failed"),
+                                QStringLiteral("Policy was set but reload failed.\n\nReason: %1")
+                                    .arg(getError));
+                            return;
+                        }
+
+                        CapturePolicy loaded;
+                        QString parseError;
+                        if (!parseCapturePolicyFromCborResult(result, &loaded, &parseError)) {
+                            QMessageBox::warning(
+                                &dialog, QStringLiteral("Capture policy apply failed"),
+                                QStringLiteral("Policy reload returned invalid payload.\n\n"
+                                               "Reason: %1")
+                                    .arg(parseError));
+                            return;
+                        }
+
+                        commitLocalChanges(loaded);
+                    });
+            });
     };
 
-    connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
+    connect(&dialog, &SettingsDialog::applyRequested, &dialog,
+            [&]() { applyFromDialog(false); });
+    connect(&dialog, &SettingsDialog::acceptRequested, &dialog,
+            [&]() { applyFromDialog(true); });
     connect(&dialog, &SettingsDialog::shortcutsEdited, &dialog,
             updateShortcutAvailability);
     updateShortcutAvailability();
 
-    if (dialog.exec() == QDialog::Accepted) {
-        applyFromDialog();
-    }
+    dialog.exec();
 }
 
 void AppController::handleQuitRequested() {
@@ -680,22 +899,39 @@ void AppController::handleQuitRequested() {
     qApp->quit();
 }
 
-bool AppController::notifyExistingInstance() {
+bool AppController::notifyExistingInstance(int timeoutMs, QString *error) {
     QLocalSocket socket;
     socket.connectToServer(m_singleInstanceName);
-    if (!socket.waitForConnected(80)) {
+    if (!socket.waitForConnected(timeoutMs)) {
+        if (error) {
+            *error = socket.errorString();
+        }
         return false;
     }
 
-    socket.write("toggle-popup\n");
-    socket.waitForBytesWritten(80);
+    if (socket.write("toggle-popup\n") < 0 || !socket.waitForBytesWritten(timeoutMs)) {
+        if (error) {
+            *error = socket.errorString();
+        }
+        socket.disconnectFromServer();
+        return false;
+    }
+
     socket.disconnectFromServer();
+    if (error) {
+        error->clear();
+    }
     return true;
 }
 
 bool AppController::startSingleInstanceServer(QString *error) {
-    m_singleInstanceServer = new QLocalServer(this);
-    QLocalServer::removeServer(m_singleInstanceName);
+    if (!m_singleInstanceServer) {
+        m_singleInstanceServer = new QLocalServer(this);
+    }
+
+    if (m_singleInstanceServer->isListening()) {
+        return true;
+    }
 
     if (!m_singleInstanceServer->listen(m_singleInstanceName)) {
         if (error) {
@@ -704,22 +940,53 @@ bool AppController::startSingleInstanceServer(QString *error) {
         return false;
     }
 
-    connect(m_singleInstanceServer, &QLocalServer::newConnection, this, [this] {
-        while (m_singleInstanceServer->hasPendingConnections()) {
-            QLocalSocket *socket = m_singleInstanceServer->nextPendingConnection();
-            connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
-                const QString command =
-                    QString::fromUtf8(socket->readAll()).trimmed();
-                if (!command.isEmpty()) {
-                    handleSingleInstanceCommand(command);
+    connect(m_singleInstanceServer, &QLocalServer::newConnection, this,
+            [this] {
+                while (m_singleInstanceServer->hasPendingConnections()) {
+                    QLocalSocket *socket = m_singleInstanceServer->nextPendingConnection();
+                    connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
+                        const QString command = QString::fromUtf8(socket->readAll()).trimmed();
+                        if (!command.isEmpty()) {
+                            handleSingleInstanceCommand(command);
+                        }
+                    });
+                    connect(socket, &QLocalSocket::disconnected, socket,
+                            &QLocalSocket::deleteLater);
                 }
-            });
-            connect(socket, &QLocalSocket::disconnected, socket,
-                    &QLocalSocket::deleteLater);
-        }
-    });
+            },
+            Qt::UniqueConnection);
 
     return true;
+}
+
+AppController::InstanceTakeoverDecision
+AppController::promptSingleInstanceTakeover(const QString &detail) {
+    QMessageBox dialog(&m_mainWindow);
+    dialog.setIcon(QMessageBox::Warning);
+    dialog.setWindowTitle(QStringLiteral("Pastetry instance conflict"));
+    dialog.setText(QStringLiteral(
+        "Pastetry detected an in-use instance socket but could not hand off to the existing UI."));
+    dialog.setInformativeText(
+        QStringLiteral("Retry handoff, take over the stale socket, or exit this launch.\n\n"
+                       "Last probe detail: %1")
+            .arg(detail.trimmed().isEmpty() ? QStringLiteral("Unknown error") : detail));
+
+    QPushButton *retryButton =
+        dialog.addButton(QStringLiteral("Retry handoff"), QMessageBox::AcceptRole);
+    QPushButton *takeOverButton =
+        dialog.addButton(QStringLiteral("Take over"), QMessageBox::DestructiveRole);
+    QPushButton *exitButton = dialog.addButton(QStringLiteral("Exit"), QMessageBox::RejectRole);
+
+    dialog.setDefaultButton(exitButton);
+    dialog.exec();
+
+    if (dialog.clickedButton() == retryButton) {
+        return InstanceTakeoverDecision::RetryHandoff;
+    }
+    if (dialog.clickedButton() == takeOverButton) {
+        return InstanceTakeoverDecision::TakeOver;
+    }
+    return InstanceTakeoverDecision::Exit;
 }
 
 void AppController::handleSingleInstanceCommand(const QString &command) {
@@ -735,27 +1002,53 @@ void AppController::loadSettings() {
     m_startToTray = m_settings.value(kSettingsStartToTray, true).toBool();
 
     m_shortcutBindings = defaultShortcutBindings();
-    bool hasV2 = false;
+    QHash<QString, bool> loadedFromV2;
     for (const auto &spec : allShortcutActionSpecs()) {
         const QString base =
             QStringLiteral("%1/%2").arg(kSettingsActionsPrefix, spec.id);
-        if (!m_settings.contains(base + QStringLiteral("/mode"))) {
+        const QString modeKey = base + QStringLiteral("/mode");
+        const QString directKey = base + QStringLiteral("/direct");
+        const QString chordFirstKey = base + QStringLiteral("/chord_first");
+        const QString chordSecondKey = base + QStringLiteral("/chord_second");
+
+        const bool hasMode = m_settings.contains(modeKey);
+        const bool hasAnyV2 = hasMode || m_settings.contains(directKey) ||
+                              m_settings.contains(chordFirstKey) ||
+                              m_settings.contains(chordSecondKey);
+        if (!hasAnyV2) {
             continue;
         }
-        hasV2 = true;
+
         ShortcutBindingConfig binding;
-        binding.mode = shortcutBindingModeFromString(
-            m_settings.value(base + QStringLiteral("/mode")).toString());
-        binding.directSequence = QKeySequence::fromString(
-            m_settings.value(base + QStringLiteral("/direct")).toString());
-        binding.chordFirstSequence = QKeySequence::fromString(
-            m_settings.value(base + QStringLiteral("/chord_first")).toString());
-        binding.chordSecondSequence = QKeySequence::fromString(
-            m_settings.value(base + QStringLiteral("/chord_second")).toString());
+        binding.directSequence =
+            QKeySequence::fromString(m_settings.value(directKey).toString());
+        binding.chordFirstSequence =
+            QKeySequence::fromString(m_settings.value(chordFirstKey).toString());
+        binding.chordSecondSequence =
+            QKeySequence::fromString(m_settings.value(chordSecondKey).toString());
+
+        if (hasMode) {
+            binding.mode = shortcutBindingModeFromString(m_settings.value(modeKey).toString());
+        } else if (!binding.directSequence.isEmpty()) {
+            binding.mode = ShortcutBindingMode::Direct;
+        } else if (!binding.chordFirstSequence.isEmpty() ||
+                   !binding.chordSecondSequence.isEmpty()) {
+            binding.mode = ShortcutBindingMode::Chord;
+        } else {
+            binding.mode = ShortcutBindingMode::Disabled;
+        }
+
         m_shortcutBindings.insert(spec.id, binding);
+        loadedFromV2.insert(spec.id, true);
     }
 
-    if (!hasV2) {
+    const auto hasV2Action = [&loadedFromV2](const QString &actionId) {
+        return loadedFromV2.value(actionId, false);
+    };
+
+    if (!hasV2Action(QStringLiteral("quick_paste_popup")) ||
+        !hasV2Action(QStringLiteral("open_history_window")) ||
+        !hasV2Action(QStringLiteral("open_inspector"))) {
         const QString quickPasteSequence =
             m_settings.contains(kSettingsQuickPasteShortcut)
                 ? m_settings.value(kSettingsQuickPasteShortcut).toString()
@@ -770,21 +1063,27 @@ void AppController::loadSettings() {
         quickBinding.mode = quickBinding.directSequence.isEmpty()
                                 ? ShortcutBindingMode::Disabled
                                 : ShortcutBindingMode::Direct;
-        m_shortcutBindings.insert(QStringLiteral("quick_paste_popup"), quickBinding);
+        if (!hasV2Action(QStringLiteral("quick_paste_popup"))) {
+            m_shortcutBindings.insert(QStringLiteral("quick_paste_popup"), quickBinding);
+        }
 
         ShortcutBindingConfig historyBinding;
         historyBinding.directSequence = QKeySequence::fromString(openHistorySequence);
         historyBinding.mode = historyBinding.directSequence.isEmpty()
                                   ? ShortcutBindingMode::Disabled
                                   : ShortcutBindingMode::Direct;
-        m_shortcutBindings.insert(QStringLiteral("open_history_window"), historyBinding);
+        if (!hasV2Action(QStringLiteral("open_history_window"))) {
+            m_shortcutBindings.insert(QStringLiteral("open_history_window"), historyBinding);
+        }
 
         ShortcutBindingConfig inspectorBinding;
         inspectorBinding.directSequence = QKeySequence::fromString(openInspectorSequence);
         inspectorBinding.mode = inspectorBinding.directSequence.isEmpty()
                                     ? ShortcutBindingMode::Disabled
                                     : ShortcutBindingMode::Direct;
-        m_shortcutBindings.insert(QStringLiteral("open_inspector"), inspectorBinding);
+        if (!hasV2Action(QStringLiteral("open_inspector"))) {
+            m_shortcutBindings.insert(QStringLiteral("open_inspector"), inspectorBinding);
+        }
     }
 
     m_autoPasteKey = QKeySequence::fromString(
@@ -810,23 +1109,32 @@ void AppController::loadSettings() {
 }
 
 void AppController::saveSettings() {
-    m_settings.setValue(kSettingsStartToTray, m_startToTray);
+    bool changed = false;
+    auto setValueIfChanged = [this, &changed](const QString &key, const QVariant &value) {
+        if (m_settings.value(key) == value) {
+            return;
+        }
+        m_settings.setValue(key, value);
+        changed = true;
+    };
+
+    setValueIfChanged(QString::fromUtf8(kSettingsStartToTray), m_startToTray);
 
     for (const auto &spec : allShortcutActionSpecs()) {
         const ShortcutBindingConfig binding = m_shortcutBindings.value(spec.id);
         const QString base =
             QStringLiteral("%1/%2").arg(kSettingsActionsPrefix, spec.id);
-        m_settings.setValue(base + QStringLiteral("/mode"),
-                            shortcutBindingModeToString(binding.mode));
-        m_settings.setValue(base + QStringLiteral("/direct"),
-                            binding.directSequence.toString());
-        m_settings.setValue(base + QStringLiteral("/chord_first"),
-                            binding.chordFirstSequence.toString());
-        m_settings.setValue(base + QStringLiteral("/chord_second"),
-                            binding.chordSecondSequence.toString());
+        setValueIfChanged(base + QStringLiteral("/mode"),
+                          shortcutBindingModeToString(binding.mode));
+        setValueIfChanged(base + QStringLiteral("/direct"),
+                          binding.directSequence.toString());
+        setValueIfChanged(base + QStringLiteral("/chord_first"),
+                          binding.chordFirstSequence.toString());
+        setValueIfChanged(base + QStringLiteral("/chord_second"),
+                          binding.chordSecondSequence.toString());
     }
 
-    m_settings.setValue(kSettingsAutoPasteKey, m_autoPasteKey.toString());
+    setValueIfChanged(QString::fromUtf8(kSettingsAutoPasteKey), m_autoPasteKey.toString());
 
     const ShortcutBindingConfig quickBinding =
         m_shortcutBindings.value(QStringLiteral("quick_paste_popup"));
@@ -834,30 +1142,36 @@ void AppController::saveSettings() {
         (quickBinding.mode == ShortcutBindingMode::Direct)
             ? quickBinding.directSequence.toString()
             : QString();
-    m_settings.setValue(kSettingsShortcut, quickLegacy);
-    m_settings.setValue(kSettingsQuickPasteShortcut, quickLegacy);
+    setValueIfChanged(QString::fromUtf8(kSettingsShortcut), quickLegacy);
+    setValueIfChanged(QString::fromUtf8(kSettingsQuickPasteShortcut), quickLegacy);
 
     const ShortcutBindingConfig historyBinding =
         m_shortcutBindings.value(QStringLiteral("open_history_window"));
-    m_settings.setValue(kSettingsOpenHistoryShortcut,
-                        historyBinding.mode == ShortcutBindingMode::Direct
-                            ? historyBinding.directSequence.toString()
-                            : QString());
+    setValueIfChanged(QString::fromUtf8(kSettingsOpenHistoryShortcut),
+                      historyBinding.mode == ShortcutBindingMode::Direct
+                          ? historyBinding.directSequence.toString()
+                          : QString());
 
     const ShortcutBindingConfig inspectorBinding =
         m_shortcutBindings.value(QStringLiteral("open_inspector"));
-    m_settings.setValue(kSettingsOpenInspectorShortcut,
-                        inspectorBinding.mode == ShortcutBindingMode::Direct
-                            ? inspectorBinding.directSequence.toString()
-                            : QString());
+    setValueIfChanged(QString::fromUtf8(kSettingsOpenInspectorShortcut),
+                      inspectorBinding.mode == ShortcutBindingMode::Direct
+                          ? inspectorBinding.directSequence.toString()
+                          : QString());
 
-    m_settings.setValue(kSettingsPopupGeometry, m_popupGeometry);
-    m_settings.setValue(kSettingsHistoryColumns, serializeColumns(m_historyColumns));
-    m_settings.setValue(kSettingsQuickColumns, serializeColumns(m_quickPasteColumns));
-    m_settings.setValue(kSettingsPreviewLines, m_previewLineCount);
-    m_settings.setValue(kSettingsSearchMode, searchModeToString(m_searchMode));
-    m_settings.setValue(kSettingsRegexStrict, m_regexStrictFullScan);
-    m_settings.sync();
+    setValueIfChanged(QString::fromUtf8(kSettingsPopupGeometry), m_popupGeometry);
+    setValueIfChanged(QString::fromUtf8(kSettingsHistoryColumns),
+                      serializeColumns(m_historyColumns));
+    setValueIfChanged(QString::fromUtf8(kSettingsQuickColumns),
+                      serializeColumns(m_quickPasteColumns));
+    setValueIfChanged(QString::fromUtf8(kSettingsPreviewLines), m_previewLineCount);
+    setValueIfChanged(QString::fromUtf8(kSettingsSearchMode),
+                      searchModeToString(m_searchMode));
+    setValueIfChanged(QString::fromUtf8(kSettingsRegexStrict), m_regexStrictFullScan);
+
+    if (changed) {
+        m_settings.sync();
+    }
 }
 
 void AppController::clearShortcutRegistrations() {
@@ -1079,52 +1393,58 @@ void AppController::handleShortcutAction(const QString &actionId) {
 }
 
 void AppController::executeSlotShortcut(const ShortcutActionSpec &spec) {
-    QString error;
     QCborMap resolveParams;
     resolveParams.insert(QStringLiteral("group"),
                          spec.pinnedGroup ? QStringLiteral("pinned")
                                           : QStringLiteral("recent_non_pinned"));
     resolveParams.insert(QStringLiteral("slot"), spec.slot);
 
-    const QCborMap resolved =
-        m_client.request(QStringLiteral("ResolveSlotEntry"), resolveParams, 1800, &error);
-    if (!error.isEmpty()) {
-        notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
-                              QStringLiteral("%1: %2").arg(spec.label, error));
-        return;
-    }
+    m_ipcRunner.request(
+        QStringLiteral("ResolveSlotEntry"), resolveParams, 1800, this,
+        [this, spec](const QCborMap &resolved, const QString &resolveError) {
+            if (!resolveError.isEmpty()) {
+                notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
+                                      QStringLiteral("%1: %2").arg(spec.label, resolveError));
+                return;
+            }
 
-    const qint64 entryId = resolved.value(QStringLiteral("entry_id")).toInteger();
-    if (entryId <= 0) {
-        notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
-                              QStringLiteral("%1: slot %2 is empty")
-                                  .arg(spec.label)
-                                  .arg(spec.slot));
-        return;
-    }
+            const qint64 entryId = resolved.value(QStringLiteral("entry_id")).toInteger();
+            if (entryId <= 0) {
+                notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
+                                      QStringLiteral("%1: slot %2 is empty")
+                                          .arg(spec.label)
+                                          .arg(spec.slot));
+                return;
+            }
 
-    QCborMap activateParams;
-    activateParams.insert(QStringLiteral("entry_id"), entryId);
-    activateParams.insert(QStringLiteral("preferred_format"), QStringLiteral(""));
-    m_client.request(QStringLiteral("ActivateEntry"), activateParams, 2500, &error);
-    if (!error.isEmpty()) {
-        notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
-                              QStringLiteral("%1: %2").arg(spec.label, error));
-        return;
-    }
+            QCborMap activateParams;
+            activateParams.insert(QStringLiteral("entry_id"), entryId);
+            activateParams.insert(QStringLiteral("preferred_format"), QStringLiteral(""));
+            m_ipcRunner.request(
+                QStringLiteral("ActivateEntry"), activateParams, 2500, this,
+                [this, spec](const QCborMap &, const QString &activateError) {
+                    if (!activateError.isEmpty()) {
+                        notifyShortcutWarning(
+                            QStringLiteral("Pastetry shortcut"),
+                            QStringLiteral("%1: %2").arg(spec.label, activateError));
+                        return;
+                    }
 
-    if (!spec.isPasteAction) {
-        return;
-    }
+                    if (!spec.isPasteAction) {
+                        return;
+                    }
 
-    QString pasteError;
-    if (!sendSyntheticPaste(&pasteError)) {
-        notifyShortcutWarning(
-            QStringLiteral("Pastetry shortcut"),
-            QStringLiteral("%1: auto-paste failed: %2")
-                .arg(spec.label, pasteError.isEmpty() ? QStringLiteral("unsupported")
-                                                      : pasteError));
-    }
+                    QString pasteError;
+                    if (!sendSyntheticPaste(&pasteError)) {
+                        notifyShortcutWarning(
+                            QStringLiteral("Pastetry shortcut"),
+                            QStringLiteral("%1: auto-paste failed: %2")
+                                .arg(spec.label,
+                                     pasteError.isEmpty() ? QStringLiteral("unsupported")
+                                                          : pasteError));
+                    }
+                });
+        });
 }
 
 bool AppController::sendSyntheticPaste(QString *error) const {
@@ -1285,30 +1605,38 @@ void AppController::notifyShortcutWarning(const QString &title,
 }
 
 void AppController::checkDaemonConnectivity(bool notifyIfUnavailable) {
-    QString error;
-    QCborMap params;
-    m_client.request(QStringLiteral("Ping"), params, 800, &error);
-
-    const bool reachable = error.isEmpty();
-    if (!m_daemonStatusKnown) {
-        m_daemonStatusKnown = true;
-        m_daemonReachable = reachable;
-        if (!reachable && notifyIfUnavailable) {
-            notifyDaemonUnavailable(error);
-        }
+    m_pingNotifyIfUnavailable = m_pingNotifyIfUnavailable || notifyIfUnavailable;
+    if (m_pingInFlight) {
         return;
     }
 
-    if (reachable == m_daemonReachable) {
-        return;
-    }
+    const bool shouldNotifyIfUnavailable = m_pingNotifyIfUnavailable;
+    m_pingNotifyIfUnavailable = false;
+    m_pingInFlight = true;
+    m_ipcRunner.request(
+        QStringLiteral("Ping"), QCborMap{}, 800, this,
+        [this, shouldNotifyIfUnavailable](const QCborMap &, const QString &error) {
+            m_pingInFlight = false;
+            const bool reachable = error.isEmpty();
+            if (!m_daemonStatusKnown) {
+                m_daemonStatusKnown = true;
+                m_daemonReachable = reachable;
+                if (!reachable && shouldNotifyIfUnavailable) {
+                    notifyDaemonUnavailable(error);
+                }
+            } else if (reachable != m_daemonReachable) {
+                m_daemonReachable = reachable;
+                if (reachable) {
+                    notifyDaemonRecovered();
+                } else {
+                    notifyDaemonUnavailable(error);
+                }
+            }
 
-    m_daemonReachable = reachable;
-    if (reachable) {
-        notifyDaemonRecovered();
-    } else {
-        notifyDaemonUnavailable(error);
-    }
+            if (m_pingNotifyIfUnavailable) {
+                checkDaemonConnectivity(false);
+            }
+        });
 }
 
 void AppController::notifyDaemonUnavailable(const QString &reason) {
@@ -1336,82 +1664,26 @@ void AppController::notifyDaemonRecovered() {
                                 QSystemTrayIcon::Information, 2500);
     }
 
-    QString policyError;
-    if (!loadCapturePolicyFromDaemon(&policyError) && !policyError.trimmed().isEmpty()) {
-        qWarning().noquote()
-            << QStringLiteral("Failed to refresh capture policy after daemon recovery: %1")
-                   .arg(policyError);
-    }
-}
-
-bool AppController::loadCapturePolicyFromDaemon(QString *error) {
-    QCborMap params;
-    QString requestError;
-    const QCborMap result =
-        m_client.request(QStringLiteral("GetCapturePolicy"), params, 1800, &requestError);
-    if (!requestError.isEmpty()) {
-        if (error) {
-            *error = requestError;
-        }
-        return false;
-    }
-
-    const QString profileText = result.value(QStringLiteral("profile")).toString();
-    const qint64 maxFormatBytes = result.value(QStringLiteral("max_format_bytes")).toInteger();
-    const qint64 maxEntryBytes = result.value(QStringLiteral("max_entry_bytes")).toInteger();
-    if (profileText.trimmed().isEmpty() || maxFormatBytes <= 0 || maxEntryBytes <= 0) {
-        if (error) {
-            *error = QStringLiteral("Invalid capture policy payload from daemon");
-        }
-        return false;
-    }
-
-    CapturePolicy loaded;
-    loaded.profile = captureProfileFromString(profileText);
-    loaded.maxFormatBytes = maxFormatBytes;
-    loaded.maxEntryBytes = maxEntryBytes;
-
-    const QCborValue allowlistValue = result.value(QStringLiteral("custom_allowlist"));
-    if (allowlistValue.isArray()) {
-        for (const QCborValue &item : allowlistValue.toArray()) {
-            const QString pattern = item.toString().trimmed();
-            if (!pattern.isEmpty()) {
-                loaded.customAllowlistPatterns.push_back(pattern);
+    m_ipcRunner.request(
+        QStringLiteral("GetCapturePolicy"), QCborMap{}, 1800, this,
+        [this](const QCborMap &result, const QString &policyError) {
+            if (!policyError.trimmed().isEmpty()) {
+                qWarning().noquote()
+                    << QStringLiteral("Failed to refresh capture policy after daemon recovery: %1")
+                           .arg(policyError);
+                return;
             }
-        }
-    }
 
-    m_capturePolicy = loaded;
-    return true;
-}
-
-bool AppController::applyCapturePolicyToDaemon(const CapturePolicy &policy, QString *error) {
-    QCborArray customAllowlist;
-    for (const QString &pattern : policy.customAllowlistPatterns) {
-        const QString trimmed = pattern.trimmed();
-        if (!trimmed.isEmpty()) {
-            customAllowlist.append(trimmed);
-        }
-    }
-
-    QCborMap params;
-    params.insert(QStringLiteral("profile"), captureProfileToString(policy.profile));
-    params.insert(QStringLiteral("custom_allowlist"), customAllowlist);
-    params.insert(QStringLiteral("max_format_bytes"), policy.maxFormatBytes);
-    params.insert(QStringLiteral("max_entry_bytes"), policy.maxEntryBytes);
-
-    QString requestError;
-    const QCborMap result =
-        m_client.request(QStringLiteral("SetCapturePolicy"), params, 2500, &requestError);
-    if (!requestError.isEmpty()) {
-        if (error) {
-            *error = requestError;
-        }
-        return false;
-    }
-
-    Q_UNUSED(result);
-    return loadCapturePolicyFromDaemon(error);
+            CapturePolicy loaded;
+            QString parseError;
+            if (!parseCapturePolicyFromCborResult(result, &loaded, &parseError)) {
+                qWarning().noquote()
+                    << QStringLiteral("Failed to refresh capture policy after daemon recovery: %1")
+                           .arg(parseError);
+                return;
+            }
+            m_capturePolicy = loaded;
+        });
 }
 
 void AppController::applyViewSettings() {

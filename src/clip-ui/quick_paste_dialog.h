@@ -1,8 +1,9 @@
 #pragma once
 
 #include "clip-ui/history_model.h"
-#include "common/ipc_client.h"
+#include "clip-ui/ipc_async_runner.h"
 
+#include <QCborMap>
 #include <QDialog>
 #include <QVector>
 
@@ -23,7 +24,7 @@ class QuickPasteDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit QuickPasteDialog(IpcClient client, QWidget *parent = nullptr);
+    explicit QuickPasteDialog(IpcAsyncRunner *ipcRunner, QWidget *parent = nullptr);
     void setVisibleColumns(const QVector<bool> &visibleColumns);
     void setPreviewLineCount(int lineCount);
     void setSearchMode(SearchMode mode);
@@ -48,8 +49,10 @@ protected:
 
 private:
     void refreshResults();
+    void startPendingSearch();
+    void setMutationBusy(bool busy);
     void activateCurrent();
-    bool activateEntryById(qint64 entryId, const QString &preferredFormat);
+    void activateEntryById(qint64 entryId, const QString &preferredFormat);
     void pinSelected();
     void deleteSelected();
     qint64 selectedEntryId() const;
@@ -60,7 +63,7 @@ private:
     void setSearchError(const QString &message);
     void syncSearchModeCombo();
 
-    IpcClient m_client;
+    IpcAsyncRunner *m_ipcRunner = nullptr;
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QComboBox *m_searchModeCombo = nullptr;
@@ -74,6 +77,10 @@ private:
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrict = false;
+    bool m_searchInFlight = false;
+    bool m_searchPending = false;
+    QCborMap m_pendingSearchParams;
+    bool m_mutationBusy = false;
 };
 
 }  // namespace pastetry

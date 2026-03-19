@@ -3,6 +3,7 @@
 #include <QAbstractNativeEventFilter>
 #include <QKeySequence>
 #include <QObject>
+#include <QVector>
 
 namespace pastetry {
 
@@ -54,7 +55,8 @@ private:
 #if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
     unsigned int m_x11Modifiers = 0;
     unsigned int m_x11Keycode = 0;
-    unsigned int m_x11NumLockMask = 0;
+    unsigned int m_x11IgnoredMask = 0;
+    QVector<unsigned int> m_x11GrabVariants;
     bool m_x11Registered = false;
 #endif
 };

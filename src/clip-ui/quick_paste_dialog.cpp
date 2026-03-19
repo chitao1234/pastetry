@@ -16,6 +16,7 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QMenu>
+#include <QPointer>
 #include <QShortcut>
 #include <QStyleOptionViewItem>
 #include <QTableView>
@@ -100,8 +101,8 @@ QString formatMenuLabel(const FormatMenuItem &format) {
 
 }  // namespace
 
-QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
-    : QDialog(parent), m_client(std::move(client)) {
+QuickPasteDialog::QuickPasteDialog(IpcAsyncRunner *ipcRunner, QWidget *parent)
+    : QDialog(parent), m_ipcRunner(ipcRunner) {
     setWindowTitle(QStringLiteral("Quick Paste"));
     setWindowFlag(Qt::Tool, true);
     resize(760, 420);
@@ -123,7 +124,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
 
     m_table = new QTableView(this);
     m_model = new HistoryModel(this);
-    m_previewDelegate = new PreviewTextDelegate(m_client, m_table);
+    m_previewDelegate = new PreviewTextDelegate(m_ipcRunner, m_table);
     m_table->setModel(m_model);
     m_table->setItemDelegate(m_previewDelegate);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -330,7 +331,11 @@ qint64 QuickPasteDialog::selectedEntryId() const {
 }
 
 void QuickPasteDialog::refreshResults() {
-    QString error;
+    if (!m_ipcRunner) {
+        emit errorOccurred(QStringLiteral("Search failed: IPC unavailable"));
+        return;
+    }
+
     QCborMap params;
     params.insert(QStringLiteral("query"), m_searchEdit->text());
     params.insert(QStringLiteral("cursor"), 0);
@@ -338,31 +343,60 @@ void QuickPasteDialog::refreshResults() {
     params.insert(QStringLiteral("mode"), searchModeToString(m_searchMode));
     params.insert(QStringLiteral("regex_strict"), m_regexStrict);
 
-    const QCborMap result = m_client.request(QStringLiteral("SearchEntries"), params,
-                                             2500, &error);
-    if (!error.isEmpty()) {
-        emit errorOccurred(error);
+    m_pendingSearchParams = params;
+    m_searchPending = true;
+    startPendingSearch();
+}
+
+void QuickPasteDialog::startPendingSearch() {
+    if (!m_searchPending || m_searchInFlight || !m_ipcRunner) {
         return;
     }
 
-    const bool queryValid =
-        !result.contains(QStringLiteral("query_valid")) ||
-        result.value(QStringLiteral("query_valid")).toBool();
-    const QString queryError = result.value(QStringLiteral("query_error")).toString();
-    if (!queryValid) {
-        setSearchError(queryError);
-        return;
-    }
-    setSearchError(QString());
+    const QCborMap params = m_pendingSearchParams;
+    m_searchPending = false;
+    m_searchInFlight = true;
 
-    QVector<EntrySummary> entries =
-        parseSummaries(result.value(QStringLiteral("entries")).toArray());
-    const int nextCursor = result.value(QStringLiteral("next_cursor")).toInteger();
-    m_model->resetData(std::move(entries), nextCursor);
+    m_ipcRunner->request(
+        QStringLiteral("SearchEntries"), params, 2500, this,
+        [this](const QCborMap &result, const QString &error) {
+            m_searchInFlight = false;
+            const bool superseded = m_searchPending;
+            if (!superseded) {
+                if (!error.isEmpty()) {
+                    emit errorOccurred(error);
+                } else {
+                    const bool queryValid =
+                        !result.contains(QStringLiteral("query_valid")) ||
+                        result.value(QStringLiteral("query_valid")).toBool();
+                    const QString queryError =
+                        result.value(QStringLiteral("query_error")).toString();
+                    if (!queryValid) {
+                        setSearchError(queryError);
+                    } else {
+                        setSearchError(QString());
 
-    if (m_model->rowCount() > 0) {
-        m_table->selectRow(0);
-    }
+                        QVector<EntrySummary> entries =
+                            parseSummaries(result.value(QStringLiteral("entries")).toArray());
+                        const int nextCursor =
+                            result.value(QStringLiteral("next_cursor")).toInteger();
+                        m_model->resetData(std::move(entries), nextCursor);
+
+                        if (m_model->rowCount() > 0) {
+                            m_table->selectRow(0);
+                        }
+                    }
+                }
+            }
+
+            if (m_searchPending) {
+                startPendingSearch();
+            }
+        });
+}
+
+void QuickPasteDialog::setMutationBusy(bool busy) {
+    m_mutationBusy = busy;
 }
 
 void QuickPasteDialog::activateCurrent() {
@@ -378,24 +412,35 @@ void QuickPasteDialog::activateCurrent() {
     activateEntryById(entryId, QString());
 }
 
-bool QuickPasteDialog::activateEntryById(qint64 entryId, const QString &preferredFormat) {
-    QString error;
+void QuickPasteDialog::activateEntryById(qint64 entryId, const QString &preferredFormat) {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), entryId);
     params.insert(QStringLiteral("preferred_format"), preferredFormat);
 
-    m_client.request(QStringLiteral("ActivateEntry"), params, 2500, &error);
-    if (!error.isEmpty()) {
-        emit errorOccurred(error);
-        return false;
-    }
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("ActivateEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                emit errorOccurred(error);
+                return;
+            }
 
-    emit entryActivated();
-    hide();
-    return true;
+            emit entryActivated();
+            hide();
+        });
 }
 
 void QuickPasteDialog::pinSelected() {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     const auto indexes = m_table->selectionModel()->selectedRows();
     if (indexes.isEmpty()) {
         return;
@@ -405,35 +450,47 @@ void QuickPasteDialog::pinSelected() {
     const qint64 id = m_model->idAt(row);
     const bool currentlyPinned = m_model->pinnedAt(row);
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), id);
     params.insert(QStringLiteral("pinned"), !currentlyPinned);
-    m_client.request(QStringLiteral("PinEntry"), params, 2500, &error);
-    if (!error.isEmpty()) {
-        emit errorOccurred(QStringLiteral("Pin failed: %1").arg(error));
-        return;
-    }
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("PinEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                emit errorOccurred(QStringLiteral("Pin failed: %1").arg(error));
+                return;
+            }
 
-    refreshResults();
+            refreshResults();
+        });
 }
 
 void QuickPasteDialog::deleteSelected() {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     const qint64 id = selectedEntryId();
     if (id < 0) {
         return;
     }
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), id);
-    m_client.request(QStringLiteral("DeleteEntry"), params, 2500, &error);
-    if (!error.isEmpty()) {
-        emit errorOccurred(QStringLiteral("Delete failed: %1").arg(error));
-        return;
-    }
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("DeleteEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                emit errorOccurred(QStringLiteral("Delete failed: %1").arg(error));
+                return;
+            }
 
-    refreshResults();
+            refreshResults();
+        });
 }
 
 void QuickPasteDialog::applyTableLayout() {
@@ -535,27 +592,42 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
                                                : QStringLiteral("Pin"));
     QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
 
-    QString detailError;
-    QCborMap detailParams;
-    detailParams.insert(QStringLiteral("entry_id"), entryId);
-    const QCborMap detailResult =
-        m_client.request(QStringLiteral("GetEntryDetail"), detailParams, 2500, &detailError);
-    if (!detailError.isEmpty()) {
-        QAction *unavailable =
-            activateAsMenu->addAction(QStringLiteral("Unavailable: %1").arg(detailError));
-        unavailable->setEnabled(false);
-    } else {
-        const QVector<FormatMenuItem> formats =
-            parseFormatMenuItems(detailResult.value(QStringLiteral("formats")).toArray());
-        if (formats.isEmpty()) {
-            QAction *none = activateAsMenu->addAction(QStringLiteral("No formats"));
-            none->setEnabled(false);
-        } else {
-            for (const auto &format : formats) {
-                QAction *action = activateAsMenu->addAction(formatMenuLabel(format));
-                action->setData(format.mimeType);
-            }
-        }
+    QAction *loadingAction = activateAsMenu->addAction(QStringLiteral("Loading formats..."));
+    loadingAction->setEnabled(false);
+
+    if (m_ipcRunner) {
+        QPointer<QMenu> menuGuard(&menu);
+        QPointer<QMenu> activateAsGuard(activateAsMenu);
+        QCborMap detailParams;
+        detailParams.insert(QStringLiteral("entry_id"), entryId);
+        m_ipcRunner->request(
+            QStringLiteral("GetEntryDetail"), detailParams, 2500, this,
+            [menuGuard, activateAsGuard](const QCborMap &detailResult, const QString &detailError) {
+                if (!menuGuard || !activateAsGuard) {
+                    return;
+                }
+
+                activateAsGuard->clear();
+                if (!detailError.isEmpty()) {
+                    QAction *unavailable = activateAsGuard->addAction(
+                        QStringLiteral("Unavailable: %1").arg(detailError));
+                    unavailable->setEnabled(false);
+                    return;
+                }
+
+                const QVector<FormatMenuItem> formats =
+                    parseFormatMenuItems(detailResult.value(QStringLiteral("formats")).toArray());
+                if (formats.isEmpty()) {
+                    QAction *none = activateAsGuard->addAction(QStringLiteral("No formats"));
+                    none->setEnabled(false);
+                    return;
+                }
+
+                for (const auto &format : formats) {
+                    QAction *action = activateAsGuard->addAction(formatMenuLabel(format));
+                    action->setData(format.mimeType);
+                }
+            });
     }
 
     QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
@@ -593,7 +665,7 @@ void QuickPasteDialog::inspectEntry(qint64 entryId) {
 
     if (!m_clipboardInspectorDialog) {
         m_clipboardInspectorDialog =
-            new ClipboardInspectorDialog(m_client, nullptr);
+            new ClipboardInspectorDialog(m_ipcRunner, nullptr);
     }
     m_clipboardInspectorDialog->inspectEntry(entryId);
 }

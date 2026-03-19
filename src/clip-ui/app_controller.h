@@ -1,11 +1,11 @@
 #pragma once
 
 #include "clip-ui/global_shortcut_service.h"
+#include "clip-ui/ipc_async_runner.h"
 #include "clip-ui/main_window.h"
 #include "clip-ui/quick_paste_dialog.h"
 #include "clip-ui/shortcut_config.h"
 #include "common/app_paths.h"
-#include "common/ipc_client.h"
 
 #include <QObject>
 #include <QSettings>
@@ -35,8 +35,15 @@ private slots:
     void handleQuitRequested();
 
 private:
-    bool notifyExistingInstance();
+    enum class InstanceTakeoverDecision {
+        Exit,
+        RetryHandoff,
+        TakeOver,
+    };
+
+    bool notifyExistingInstance(int timeoutMs, QString *error = nullptr);
     bool startSingleInstanceServer(QString *error);
+    InstanceTakeoverDecision promptSingleInstanceTakeover(const QString &detail);
     void handleSingleInstanceCommand(const QString &command);
 
     void setupTray();
@@ -56,15 +63,13 @@ private:
     void checkDaemonConnectivity(bool notifyIfUnavailable);
     void notifyDaemonUnavailable(const QString &reason);
     void notifyDaemonRecovered();
-    bool loadCapturePolicyFromDaemon(QString *error);
-    bool applyCapturePolicyToDaemon(const CapturePolicy &policy, QString *error);
     QVector<bool> parseColumns(const QString &text,
                                const QVector<bool> &fallback) const;
     QString serializeColumns(const QVector<bool> &columns) const;
     QVector<bool> normalizedColumns(const QVector<bool> &columns) const;
 
     AppPaths m_paths;
-    IpcClient m_client;
+    IpcAsyncRunner m_ipcRunner;
     MainWindow m_mainWindow;
     QuickPasteDialog m_quickPasteDialog;
 
@@ -106,6 +111,8 @@ private:
     bool m_isQuitting = false;
     bool m_daemonStatusKnown = false;
     bool m_daemonReachable = false;
+    bool m_pingInFlight = false;
+    bool m_pingNotifyIfUnavailable = false;
     QTimer m_daemonHealthTimer;
     QTimer m_chordTimeoutTimer;
 };

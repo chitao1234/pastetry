@@ -16,6 +16,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QShortcut>
+#include <QPointer>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QStyleOptionViewItem>
@@ -136,8 +137,8 @@ QString formatMenuLabel(const FormatMenuItem &format) {
 
 }  // namespace
 
-MainWindow::MainWindow(IpcClient client, QWidget *parent)
-    : QMainWindow(parent), m_client(std::move(client)) {
+MainWindow::MainWindow(IpcAsyncRunner *ipcRunner, QWidget *parent)
+    : QMainWindow(parent), m_ipcRunner(ipcRunner) {
     setWindowTitle("Pastetry");
     resize(980, 620);
 
@@ -175,7 +176,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     auto *reorderTable = new PinnedReorderTableView(this);
     m_table = reorderTable;
     m_model = new HistoryModel(this);
-    m_previewDelegate = new PreviewTextDelegate(m_client, m_table);
+    m_previewDelegate = new PreviewTextDelegate(m_ipcRunner, m_table);
     m_table->setModel(m_model);
     m_table->setItemDelegate(m_previewDelegate);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -375,7 +376,11 @@ qint64 MainWindow::selectedEntryId() const {
 }
 
 void MainWindow::refresh(bool resetCursor) {
-    QString error;
+    if (!m_ipcRunner) {
+        statusBar()->showMessage(QStringLiteral("Search failed: IPC unavailable"), 4000);
+        return;
+    }
+
     QCborMap params;
     params.insert(QStringLiteral("query"), m_searchEdit->text());
     params.insert(QStringLiteral("cursor"), resetCursor ? 0 : m_cursor);
@@ -383,55 +388,110 @@ void MainWindow::refresh(bool resetCursor) {
     params.insert(QStringLiteral("mode"), searchModeToString(m_searchMode));
     params.insert(QStringLiteral("regex_strict"), m_regexStrict);
 
-    const QCborMap result = m_client.request("SearchEntries", params, 2500, &error);
-    if (!error.isEmpty()) {
-        statusBar()->showMessage(QStringLiteral("Search failed: %1").arg(error), 4000);
+    m_pendingSearchParams = params;
+    m_pendingSearchResetCursor = resetCursor;
+    m_searchPending = true;
+    startPendingSearch();
+}
+
+void MainWindow::startPendingSearch() {
+    if (m_searchInFlight || !m_searchPending || !m_ipcRunner) {
         return;
     }
 
-    const bool queryValid =
-        !result.contains(QStringLiteral("query_valid")) ||
-        result.value(QStringLiteral("query_valid")).toBool();
-    const QString queryError = result.value(QStringLiteral("query_error")).toString();
-    if (!queryValid) {
-        setSearchError(queryError);
-        statusBar()->showMessage(QStringLiteral("Invalid query"), 2500);
-        return;
+    const QCborMap params = m_pendingSearchParams;
+    const bool resetCursor = m_pendingSearchResetCursor;
+    m_searchPending = false;
+    m_searchInFlight = true;
+    m_loadMoreButton->setEnabled(false);
+
+    m_ipcRunner->request(
+        QStringLiteral("SearchEntries"), params, 2500, this,
+        [this, resetCursor](const QCborMap &result, const QString &error) {
+            m_searchInFlight = false;
+            const bool superseded = m_searchPending;
+            if (!superseded) {
+                if (!error.isEmpty()) {
+                    statusBar()->showMessage(QStringLiteral("Search failed: %1").arg(error),
+                                             4000);
+                } else {
+                    const bool queryValid =
+                        !result.contains(QStringLiteral("query_valid")) ||
+                        result.value(QStringLiteral("query_valid")).toBool();
+                    const QString queryError =
+                        result.value(QStringLiteral("query_error")).toString();
+                    if (!queryValid) {
+                        setSearchError(queryError);
+                        statusBar()->showMessage(QStringLiteral("Invalid query"), 2500);
+                    } else {
+                        setSearchError(QString());
+
+                        QVector<EntrySummary> entries =
+                            parseSummaries(result.value(QStringLiteral("entries")).toArray());
+                        const int nextCursor =
+                            result.value(QStringLiteral("next_cursor")).toInteger();
+
+                        if (resetCursor) {
+                            m_model->resetData(std::move(entries), nextCursor);
+                        } else {
+                            m_model->appendData(std::move(entries), nextCursor);
+                        }
+
+                        m_cursor = m_model->nextCursor();
+                        updatePinnedReorderEnabled();
+                        statusBar()->showMessage(
+                            QStringLiteral("Loaded %1 entries").arg(m_model->rowCount()), 2000);
+                    }
+                }
+            }
+
+            if (m_searchPending) {
+                startPendingSearch();
+            } else {
+                m_loadMoreButton->setEnabled(m_cursor >= 0);
+            }
+        });
+}
+
+void MainWindow::setMutationBusy(bool busy) {
+    m_mutationBusy = busy;
+    if (m_activateButton) {
+        m_activateButton->setEnabled(!busy);
     }
-    setSearchError(QString());
-
-    QVector<EntrySummary> entries = parseSummaries(result.value("entries").toArray());
-    const int nextCursor = result.value("next_cursor").toInteger();
-
-    if (resetCursor) {
-        m_model->resetData(std::move(entries), nextCursor);
-    } else {
-        m_model->appendData(std::move(entries), nextCursor);
+    if (m_pinButton) {
+        m_pinButton->setEnabled(!busy);
     }
-
-    m_cursor = m_model->nextCursor();
-    m_loadMoreButton->setEnabled(m_cursor >= 0);
-    updatePinnedReorderEnabled();
-    statusBar()->showMessage(QStringLiteral("Loaded %1 entries").arg(m_model->rowCount()),
-                             2000);
+    if (m_deleteButton) {
+        m_deleteButton->setEnabled(!busy);
+    }
+    if (m_clearButton) {
+        m_clearButton->setEnabled(!busy);
+    }
+    if (m_loadMoreButton && !m_searchInFlight && !m_searchPending) {
+        m_loadMoreButton->setEnabled(!busy && m_cursor >= 0);
+    }
 }
 
 void MainWindow::movePinnedEntry(qint64 entryId, int targetPinnedIndex) {
-    if (entryId <= 0 || targetPinnedIndex < 0) {
+    if (entryId <= 0 || targetPinnedIndex < 0 || m_mutationBusy || !m_ipcRunner) {
         return;
     }
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), entryId);
     params.insert(QStringLiteral("target_index"), targetPinnedIndex);
-    m_client.request(QStringLiteral("MovePinnedEntry"), params, 2500, &error);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, QStringLiteral("Pinned reorder failed"), error);
-        return;
-    }
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("MovePinnedEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Pinned reorder failed"), error);
+                return;
+            }
 
-    refresh(true);
+            refresh(true);
+        });
 }
 
 void MainWindow::updatePinnedReorderEnabled() {
@@ -551,27 +611,42 @@ void MainWindow::showEntryContextMenu(const QPoint &position) {
                                                : QStringLiteral("Pin"));
     QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
 
-    QString detailError;
-    QCborMap detailParams;
-    detailParams.insert(QStringLiteral("entry_id"), entryId);
-    const QCborMap detailResult =
-        m_client.request(QStringLiteral("GetEntryDetail"), detailParams, 2500, &detailError);
-    if (!detailError.isEmpty()) {
-        QAction *unavailable =
-            activateAsMenu->addAction(QStringLiteral("Unavailable: %1").arg(detailError));
-        unavailable->setEnabled(false);
-    } else {
-        const QVector<FormatMenuItem> formats =
-            parseFormatMenuItems(detailResult.value(QStringLiteral("formats")).toArray());
-        if (formats.isEmpty()) {
-            QAction *none = activateAsMenu->addAction(QStringLiteral("No formats"));
-            none->setEnabled(false);
-        } else {
-            for (const auto &format : formats) {
-                QAction *action = activateAsMenu->addAction(formatMenuLabel(format));
-                action->setData(format.mimeType);
-            }
-        }
+    QAction *loadingAction = activateAsMenu->addAction(QStringLiteral("Loading formats..."));
+    loadingAction->setEnabled(false);
+
+    if (m_ipcRunner) {
+        QPointer<QMenu> menuGuard(&menu);
+        QPointer<QMenu> activateAsGuard(activateAsMenu);
+        QCborMap detailParams;
+        detailParams.insert(QStringLiteral("entry_id"), entryId);
+        m_ipcRunner->request(
+            QStringLiteral("GetEntryDetail"), detailParams, 2500, this,
+            [menuGuard, activateAsGuard](const QCborMap &detailResult, const QString &detailError) {
+                if (!menuGuard || !activateAsGuard) {
+                    return;
+                }
+
+                activateAsGuard->clear();
+                if (!detailError.isEmpty()) {
+                    QAction *unavailable = activateAsGuard->addAction(
+                        QStringLiteral("Unavailable: %1").arg(detailError));
+                    unavailable->setEnabled(false);
+                    return;
+                }
+
+                const QVector<FormatMenuItem> formats =
+                    parseFormatMenuItems(detailResult.value(QStringLiteral("formats")).toArray());
+                if (formats.isEmpty()) {
+                    QAction *none = activateAsGuard->addAction(QStringLiteral("No formats"));
+                    none->setEnabled(false);
+                    return;
+                }
+
+                for (const auto &format : formats) {
+                    QAction *action = activateAsGuard->addAction(formatMenuLabel(format));
+                    action->setData(format.mimeType);
+                }
+            });
     }
 
     QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
@@ -609,7 +684,7 @@ void MainWindow::inspectEntry(qint64 entryId) {
 
     if (!m_clipboardInspectorDialog) {
         m_clipboardInspectorDialog =
-            new ClipboardInspectorDialog(m_client, nullptr);
+            new ClipboardInspectorDialog(m_ipcRunner, nullptr);
     }
     m_clipboardInspectorDialog->inspectEntry(entryId);
 }
@@ -635,23 +710,34 @@ void MainWindow::activateSelected() {
     activateEntry(id, QString());
 }
 
-bool MainWindow::activateEntry(qint64 entryId, const QString &preferredFormat) {
-    QString error;
+void MainWindow::activateEntry(qint64 entryId, const QString &preferredFormat) {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), entryId);
     params.insert(QStringLiteral("preferred_format"), preferredFormat);
 
-    m_client.request("ActivateEntry", params, 2500, &error);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, "Activate failed", error);
-        return false;
-    }
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("ActivateEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Activate failed"), error);
+                return;
+            }
 
-    statusBar()->showMessage("Clipboard updated", 2000);
-    return true;
+            statusBar()->showMessage(QStringLiteral("Clipboard updated"), 2000);
+        });
 }
 
 void MainWindow::pinSelected() {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     const auto indexes = m_table->selectionModel()->selectedRows();
     if (indexes.isEmpty()) {
         return;
@@ -661,57 +747,74 @@ void MainWindow::pinSelected() {
     const qint64 id = m_model->idAt(row);
     const bool currentlyPinned = m_model->pinnedAt(row);
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), id);
     params.insert(QStringLiteral("pinned"), !currentlyPinned);
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("PinEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Pin failed"), error);
+                return;
+            }
 
-    m_client.request("PinEntry", params, 2500, &error);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, "Pin failed", error);
-        return;
-    }
-
-    refresh(true);
+            refresh(true);
+        });
 }
 
 void MainWindow::deleteSelected() {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     const qint64 id = selectedEntryId();
     if (id < 0) {
         return;
     }
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), id);
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("DeleteEntry"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Delete failed"), error);
+                return;
+            }
 
-    m_client.request("DeleteEntry", params, 2500, &error);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, "Delete failed", error);
-        return;
-    }
-
-    refresh(true);
+            refresh(true);
+        });
 }
 
 void MainWindow::clearHistory() {
+    if (m_mutationBusy || !m_ipcRunner) {
+        return;
+    }
+
     if (QMessageBox::question(
             this, "Clear unpinned",
             "Delete all unpinned clipboard entries?") != QMessageBox::Yes) {
         return;
     }
 
-    QString error;
     QCborMap params;
     params.insert(QStringLiteral("keep_pinned"), true);
+    setMutationBusy(true);
+    m_ipcRunner->request(
+        QStringLiteral("ClearHistory"), params, 2500, this,
+        [this](const QCborMap &, const QString &error) {
+            setMutationBusy(false);
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("Clear failed"), error);
+                return;
+            }
 
-    m_client.request("ClearHistory", params, 2500, &error);
-    if (!error.isEmpty()) {
-        QMessageBox::warning(this, "Clear failed", error);
-        return;
-    }
-
-    refresh(true);
+            refresh(true);
+        });
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {

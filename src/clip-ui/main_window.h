@@ -1,8 +1,9 @@
 #pragma once
 
 #include "clip-ui/history_model.h"
-#include "common/ipc_client.h"
+#include "clip-ui/ipc_async_runner.h"
 
+#include <QCborMap>
 #include <QCloseEvent>
 #include <QMainWindow>
 #include <QVector>
@@ -24,7 +25,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(IpcClient client, QWidget *parent = nullptr);
+    explicit MainWindow(IpcAsyncRunner *ipcRunner, QWidget *parent = nullptr);
     void showAndActivate();
     void setCloseToTrayEnabled(bool enabled);
     void setVisibleColumns(const QVector<bool> &visibleColumns);
@@ -45,12 +46,14 @@ private:
     void loadInitial();
     void loadMore();
     void activateSelected();
-    bool activateEntry(qint64 entryId, const QString &preferredFormat);
+    void activateEntry(qint64 entryId, const QString &preferredFormat);
     void pinSelected();
     void deleteSelected();
     void clearHistory();
 
     void refresh(bool resetCursor);
+    void startPendingSearch();
+    void setMutationBusy(bool busy);
     qint64 selectedEntryId() const;
     void movePinnedEntry(qint64 entryId, int targetPinnedIndex);
     void updatePinnedReorderEnabled();
@@ -61,7 +64,7 @@ private:
     void setSearchError(const QString &message);
     void syncSearchModeCombo();
 
-    IpcClient m_client;
+    IpcAsyncRunner *m_ipcRunner = nullptr;
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QComboBox *m_searchModeCombo = nullptr;
@@ -83,6 +86,11 @@ private:
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrict = false;
+    bool m_searchInFlight = false;
+    bool m_searchPending = false;
+    bool m_pendingSearchResetCursor = true;
+    QCborMap m_pendingSearchParams;
+    bool m_mutationBusy = false;
 };
 
 }  // namespace pastetry

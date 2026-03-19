@@ -25,8 +25,8 @@ bool isImagePlaceholderText(const QString &text) {
 
 }  // namespace
 
-PreviewTextDelegate::PreviewTextDelegate(IpcClient client, QObject *parent)
-    : QStyledItemDelegate(parent), m_client(std::move(client)) {}
+PreviewTextDelegate::PreviewTextDelegate(IpcAsyncRunner *ipcRunner, QObject *parent)
+    : QStyledItemDelegate(parent), m_ipcRunner(ipcRunner) {}
 
 void PreviewTextDelegate::setMaxLines(int maxLines) {
     m_maxLines = qBound(1, maxLines, 12);
@@ -98,38 +98,52 @@ QPixmap PreviewTextDelegate::imageForHash(const QString &hash, int targetSide) c
         return {};
     }
 
-    QString error;
+    if (m_loadingImageHashes.contains(cacheKey) || !m_ipcRunner) {
+        return {};
+    }
+
+    m_loadingImageHashes.insert(cacheKey, true);
+
     QCborMap params;
     params.insert(QStringLiteral("blob_hash"), hash);
     params.insert(QStringLiteral("max_edge"), targetSide);
 
-    const QCborMap result =
-        m_client.request(QStringLiteral("GetImagePreview"), params, 1200, &error);
-    if (!error.isEmpty()) {
-        m_failedImageHashes.insert(cacheKey, true);
-        return {};
-    }
+    m_ipcRunner->request(
+        QStringLiteral("GetImagePreview"), params, 1200,
+        const_cast<PreviewTextDelegate *>(this),
+        [this, cacheKey](const QCborMap &result, const QString &error) {
+            m_loadingImageHashes.remove(cacheKey);
+            if (!error.isEmpty()) {
+                m_failedImageHashes.insert(cacheKey, true);
+                return;
+            }
 
-    const QByteArray bytes = result.value(QStringLiteral("bytes")).toByteArray();
-    if (bytes.isEmpty()) {
-        m_failedImageHashes.insert(cacheKey, true);
-        return {};
-    }
+            const QByteArray bytes = result.value(QStringLiteral("bytes")).toByteArray();
+            if (bytes.isEmpty()) {
+                m_failedImageHashes.insert(cacheKey, true);
+                return;
+            }
 
-    const QImage image = QImage::fromData(bytes);
-    if (image.isNull()) {
-        m_failedImageHashes.insert(cacheKey, true);
-        return {};
-    }
+            const QImage image = QImage::fromData(bytes);
+            if (image.isNull()) {
+                m_failedImageHashes.insert(cacheKey, true);
+                return;
+            }
 
-    const QPixmap pixmap = QPixmap::fromImage(image);
-    if (pixmap.isNull()) {
-        m_failedImageHashes.insert(cacheKey, true);
-        return {};
-    }
+            const QPixmap pixmap = QPixmap::fromImage(image);
+            if (pixmap.isNull()) {
+                m_failedImageHashes.insert(cacheKey, true);
+                return;
+            }
 
-    m_imageCache.insert(cacheKey, pixmap);
-    return pixmap;
+            m_imageCache.insert(cacheKey, pixmap);
+
+            auto *table = qobject_cast<QTableView *>(parent());
+            if (table && table->viewport()) {
+                table->viewport()->update();
+            }
+        });
+    return {};
 }
 
 bool PreviewTextDelegate::isRowNew(const QModelIndex &index) const {

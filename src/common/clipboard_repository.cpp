@@ -11,7 +11,6 @@ namespace pastetry {
 namespace {
 
 constexpr int kMaxSearchLimit = 500;
-constexpr int kRegexBatchSize = 400;
 constexpr int kRegexBoundedRowLimit = 4000;
 
 const QString kSummaryColumns = QStringLiteral(
@@ -651,59 +650,40 @@ SearchResult runRegexSearch(const QSqlDatabase &db, const SearchRequest &request
 
     const int boundedLimit = request.regexStrict ? -1 : kRegexBoundedRowLimit;
     const int targetMatchCount = safeCursor + safeLimit + 1;
-
-    int rowOffset = 0;
     int matchCount = 0;
-    bool stop = false;
+    QSqlQuery scan(db);
+    QString sql = QStringLiteral("SELECT e.id, e.preview "
+                                 "FROM entries e "
+                                 "ORDER BY %1")
+                      .arg(kPinnedThenRecencyOrder);
+    if (boundedLimit >= 0) {
+        sql += QStringLiteral(" LIMIT ?");
+    }
+    scan.prepare(sql);
+    if (boundedLimit >= 0) {
+        scan.addBindValue(boundedLimit);
+    }
 
-    while (!stop) {
-        int rowsToRead = kRegexBatchSize;
-        if (boundedLimit >= 0) {
-            rowsToRead = qMin(rowsToRead, boundedLimit - rowOffset);
-            if (rowsToRead <= 0) {
-                break;
-            }
+    if (!scan.exec()) {
+        if (error) {
+            *error = scan.lastError().text();
+        }
+        return result;
+    }
+
+    while (scan.next()) {
+        const qint64 id = scan.value(0).toLongLong();
+        const QString preview = scan.value(1).toString();
+
+        if (!regex.match(preview).hasMatch()) {
+            continue;
         }
 
-        QSqlQuery scan(db);
-        scan.prepare(
-            QStringLiteral("SELECT e.id, e.preview "
-                           "FROM entries e "
-                           "ORDER BY %1 "
-                           "LIMIT ? OFFSET ?")
-                .arg(kPinnedThenRecencyOrder));
-        scan.addBindValue(rowsToRead);
-        scan.addBindValue(rowOffset);
-
-        if (!scan.exec()) {
-            if (error) {
-                *error = scan.lastError().text();
-            }
-            return result;
+        if (matchCount >= safeCursor && pageIds.size() < safeLimit + 1) {
+            pageIds.push_back(id);
         }
-
-        int rowsRead = 0;
-        while (scan.next()) {
-            ++rowsRead;
-            const qint64 id = scan.value(0).toLongLong();
-            const QString preview = scan.value(1).toString();
-
-            if (!regex.match(preview).hasMatch()) {
-                continue;
-            }
-
-            if (matchCount >= safeCursor && pageIds.size() < safeLimit + 1) {
-                pageIds.push_back(id);
-            }
-            ++matchCount;
-            if (matchCount >= targetMatchCount) {
-                stop = true;
-                break;
-            }
-        }
-
-        rowOffset += rowsRead;
-        if (rowsRead < rowsToRead) {
+        ++matchCount;
+        if (matchCount >= targetMatchCount) {
             break;
         }
     }
@@ -890,6 +870,16 @@ bool ClipboardRepository::initialize(QString *error) {
             }
             return false;
         }
+    }
+
+    QSqlQuery normalizePolicy(m_db);
+    if (!normalizePolicy.exec(
+            "UPDATE capture_policy SET custom_allowlist = '' "
+            "WHERE custom_allowlist IS NULL")) {
+        if (error) {
+            *error = normalizePolicy.lastError().text();
+        }
+        return false;
     }
 
     QSqlQuery tableInfo(m_db);
@@ -1151,7 +1141,7 @@ bool ClipboardRepository::loadCapturePolicy(CapturePolicy *policy, QString *erro
 
     QSqlQuery query(m_db);
     query.prepare(
-        "SELECT profile, custom_allowlist, max_format_bytes, max_entry_bytes "
+        "SELECT profile, COALESCE(custom_allowlist, ''), max_format_bytes, max_entry_bytes "
         "FROM capture_policy WHERE id = 1");
     if (!query.exec()) {
         if (error) {
@@ -1191,12 +1181,15 @@ bool ClipboardRepository::saveCapturePolicy(const CapturePolicy &policy, QString
         }
     }
 
+    const QString customAllowlistText =
+        customLines.isEmpty() ? QStringLiteral("") : customLines.join('\n');
+
     QSqlQuery query(m_db);
     query.prepare(
-        "UPDATE capture_policy SET profile = ?, custom_allowlist = ?, "
+        "UPDATE capture_policy SET profile = ?, custom_allowlist = COALESCE(?, ''), "
         "max_format_bytes = ?, max_entry_bytes = ? WHERE id = 1");
     query.addBindValue(captureProfileToString(policy.profile));
-    query.addBindValue(customLines.join('\n'));
+    query.addBindValue(customAllowlistText);
     query.addBindValue(policy.maxFormatBytes);
     query.addBindValue(policy.maxEntryBytes);
     if (!query.exec()) {

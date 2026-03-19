@@ -13,6 +13,7 @@ private slots:
     void searchPaginationAtScale();
     void regexSearchValidationAndResults();
     void regexStrictModeFindsOlderMatches();
+    void regexStrictModePagination();
     void advancedSearchFiltersAndErrors();
     void preservesFormatInsertionOrder();
     void persistsCapturePolicy();
@@ -180,6 +181,55 @@ void RepositoryTests::regexStrictModeFindsOlderMatches() {
     QCOMPARE(strictResult.entries.first().preview, QString("needle_old_record"));
 }
 
+void RepositoryTests::regexStrictModePagination() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-regex-strict-pagination");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    for (int i = 0; i < 5200; ++i) {
+        CapturedEntry entry;
+        entry.sourceApp = "generator";
+        entry.preview = QString("recent entry %1").arg(i);
+        if (i % 2 == 0) {
+            entry.preview += QStringLiteral(" token_match");
+        }
+        entry.formats = {CapturedFormat{"text/plain", entry.preview.toUtf8()}};
+        QVERIFY2(repo.insertEntry(entry, &error) > 0, qPrintable(error));
+    }
+
+    SearchRequest strict;
+    strict.mode = SearchMode::Regex;
+    strict.query = "token_match$";
+    strict.limit = 25;
+    strict.regexStrict = true;
+
+    SearchResult firstPage = repo.searchEntries(strict, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(firstPage.queryValid);
+    QCOMPARE(firstPage.entries.size(), 25);
+    QVERIFY(firstPage.nextCursor >= 0);
+
+    strict.cursor = firstPage.nextCursor;
+    SearchResult secondPage = repo.searchEntries(strict, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(secondPage.queryValid);
+    QCOMPARE(secondPage.entries.size(), 25);
+    QVERIFY(secondPage.nextCursor >= 0);
+
+    for (const EntrySummary &entry : firstPage.entries) {
+        QVERIFY(entry.preview.endsWith("token_match"));
+    }
+    for (const EntrySummary &entry : secondPage.entries) {
+        QVERIFY(entry.preview.endsWith("token_match"));
+    }
+}
+
 void RepositoryTests::advancedSearchFiltersAndErrors() {
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -306,6 +356,15 @@ void RepositoryTests::persistsCapturePolicy() {
     QCOMPARE(loaded.customAllowlistPatterns.at(1), QString("image/*"));
     QCOMPARE(loaded.maxFormatBytes, 5 * 1024 * 1024);
     QCOMPARE(loaded.maxEntryBytes, 25 * 1024 * 1024);
+
+    CapturePolicy emptyAllowlistPolicy = loaded;
+    emptyAllowlistPolicy.customAllowlistPatterns.clear();
+    QVERIFY2(repo.saveCapturePolicy(emptyAllowlistPolicy, &error), qPrintable(error));
+
+    CapturePolicy loadedEmptyAllowlist;
+    QVERIFY2(repo.loadCapturePolicy(&loadedEmptyAllowlist, &error), qPrintable(error));
+    QVERIFY(loadedEmptyAllowlist.customAllowlistPatterns.isEmpty());
+    QCOMPARE(loadedEmptyAllowlist.profile, emptyAllowlistPolicy.profile);
 }
 
 void RepositoryTests::pinnedOrderMoveAndRepin() {

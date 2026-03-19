@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/ipc_client.h"
+#include "clip-ui/ipc_async_runner.h"
 
 #include <QHash>
 #include <QPixmap>
@@ -12,7 +12,7 @@ class PreviewTextDelegate : public QStyledItemDelegate {
     Q_OBJECT
 
 public:
-    explicit PreviewTextDelegate(IpcClient client, QObject *parent = nullptr);
+    explicit PreviewTextDelegate(IpcAsyncRunner *ipcRunner, QObject *parent = nullptr);
 
     void setMaxLines(int maxLines);
     int maxLines() const;
@@ -32,11 +32,12 @@ private:
     bool isFirstVisibleColumn(const QStyleOptionViewItem &option,
                               const QModelIndex &index) const;
 
-    IpcClient m_client;
+    IpcAsyncRunner *m_ipcRunner = nullptr;
     int m_maxLines = 2;
     qint64 m_newEntryTtlMs = 45 * 1000;
     mutable QHash<QString, QPixmap> m_imageCache;
     mutable QHash<QString, bool> m_failedImageHashes;
+    mutable QHash<QString, bool> m_loadingImageHashes;
 };
 
 }  // namespace pastetry

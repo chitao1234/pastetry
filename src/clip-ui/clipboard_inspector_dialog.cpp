@@ -177,8 +177,8 @@ QStringList parseUriListPreview(const QByteArray &payload) {
 
 }  // namespace
 
-ClipboardInspectorDialog::ClipboardInspectorDialog(IpcClient client, QWidget *parent)
-    : QDialog(parent), m_client(std::move(client)),
+ClipboardInspectorDialog::ClipboardInspectorDialog(IpcAsyncRunner *ipcRunner, QWidget *parent)
+    : QDialog(parent), m_ipcRunner(ipcRunner),
       m_clipboard(QGuiApplication::clipboard()) {
     setWindowTitle(QStringLiteral("Inspector"));
     resize(1040, 680);
@@ -435,41 +435,59 @@ void ClipboardInspectorDialog::refreshStoredEntry() {
         return;
     }
 
-    QString error;
-    QCborMap params;
-    params.insert(QStringLiteral("entry_id"), m_entryId);
-    const QCborMap detail =
-        m_client.request(QStringLiteral("GetEntryDetail"), params, 2500, &error);
-    if (!error.isEmpty()) {
+    if (!m_ipcRunner) {
         setWindowTitle(QStringLiteral("Inspector - Stored Item"));
         m_summaryLabel->setText(
-            QStringLiteral("Failed to load entry #%1: %2").arg(m_entryId).arg(error));
+            QStringLiteral("Failed to load entry #%1: IPC unavailable").arg(m_entryId));
         return;
     }
 
-    const QCborArray formats = detail.value(QStringLiteral("formats")).toArray();
-    updateSummaryLabelStoredEntry(detail, formats.size());
-    m_entryPreview->setPlainText(detail.value(QStringLiteral("preview")).toString());
+    const qint64 requestedEntryId = m_entryId;
+    m_entryDetailInFlight = true;
+    m_summaryLabel->setText(QStringLiteral("Loading entry #%1...").arg(m_entryId));
 
-    setWindowTitle(QStringLiteral("Inspector - Entry #%1").arg(m_entryId));
+    QCborMap params;
+    params.insert(QStringLiteral("entry_id"), m_entryId);
+    m_entryDetailRequestId = m_ipcRunner->request(
+        QStringLiteral("GetEntryDetail"), params, 2500, this,
+        [this, requestedEntryId](const QCborMap &detail, const QString &error) {
+            m_entryDetailInFlight = false;
 
-    m_table->setRowCount(formats.size());
-    m_snapshots.reserve(formats.size());
-    for (int row = 0; row < formats.size(); ++row) {
-        const QCborMap formatMap = formats.at(row).toMap();
-        FormatSnapshot snapshot;
-        snapshot.mimeType = formatMap.value(QStringLiteral("mime_type")).toString();
-        snapshot.byteSize = formatMap.value(QStringLiteral("byte_size")).toInteger();
-        snapshot.blobHash = formatMap.value(QStringLiteral("blob_hash")).toString();
-        snapshot.kind = payloadKind(snapshot.mimeType, {});
+            if (currentSourceMode() != SourceMode::StoredEntry || requestedEntryId != m_entryId) {
+                return;
+            }
 
-        appendSnapshotRow(row, snapshot);
-        m_snapshots.push_back(snapshot);
-    }
+            if (!error.isEmpty()) {
+                setWindowTitle(QStringLiteral("Inspector - Stored Item"));
+                m_summaryLabel->setText(
+                    QStringLiteral("Failed to load entry #%1: %2").arg(m_entryId).arg(error));
+                return;
+            }
 
-    if (!m_snapshots.isEmpty()) {
-        m_table->selectRow(0);
-    }
+            const QCborArray formats = detail.value(QStringLiteral("formats")).toArray();
+            updateSummaryLabelStoredEntry(detail, formats.size());
+            m_entryPreview->setPlainText(detail.value(QStringLiteral("preview")).toString());
+
+            setWindowTitle(QStringLiteral("Inspector - Entry #%1").arg(m_entryId));
+
+            m_table->setRowCount(formats.size());
+            m_snapshots.reserve(formats.size());
+            for (int row = 0; row < formats.size(); ++row) {
+                const QCborMap formatMap = formats.at(row).toMap();
+                FormatSnapshot snapshot;
+                snapshot.mimeType = formatMap.value(QStringLiteral("mime_type")).toString();
+                snapshot.byteSize = formatMap.value(QStringLiteral("byte_size")).toInteger();
+                snapshot.blobHash = formatMap.value(QStringLiteral("blob_hash")).toString();
+                snapshot.kind = payloadKind(snapshot.mimeType, {});
+
+                appendSnapshotRow(row, snapshot);
+                m_snapshots.push_back(snapshot);
+            }
+
+            if (!m_snapshots.isEmpty()) {
+                m_table->selectRow(0);
+            }
+        });
 }
 
 void ClipboardInspectorDialog::updateSummaryLabelClipboard(const QMimeData *mimeData,
@@ -568,129 +586,96 @@ void ClipboardInspectorDialog::populateSnapshotFromPayload(
     }
 }
 
-bool ClipboardInspectorDialog::ensureStoredPayloadLoaded(int index, QString *error) {
-    if (error) {
-        error->clear();
-    }
-
-    if (index < 0 || index >= m_snapshots.size()) {
-        if (error) {
-            *error = QStringLiteral("Invalid format index");
-        }
-        return false;
+void ClipboardInspectorDialog::requestStoredPayload(int index) {
+    if (!m_ipcRunner || index < 0 || index >= m_snapshots.size()) {
+        return;
     }
 
     FormatSnapshot &snapshot = m_snapshots[index];
-    if (snapshot.payloadFetched) {
-        return true;
+    if (snapshot.payloadFetched || snapshot.payloadLoading) {
+        return;
     }
-
-    bool truncated = false;
-    qint64 originalSize = 0;
-    QString requestError;
-    const QByteArray payload =
-        requestStoredPayload(snapshot, &requestError, &truncated, &originalSize);
-    if (!requestError.isEmpty()) {
-        if (error) {
-            *error = requestError;
-        }
-        return false;
-    }
-
-    snapshot.payloadFetched = true;
-    snapshot.payload = payload;
-    snapshot.payloadTruncated = truncated;
-    snapshot.payloadOriginalSize = originalSize;
-    if (snapshot.byteSize <= 0) {
-        snapshot.byteSize = originalSize;
-    }
-
-    populateSnapshotFromPayload(&snapshot);
-    if (snapshot.kind == QLatin1String("Image") && !snapshot.blobHash.isEmpty() &&
-        snapshot.imagePreview.isNull()) {
-        QString imageError;
-        snapshot.imagePreview = requestStoredImagePreview(snapshot.blobHash, &imageError);
-        Q_UNUSED(imageError);
-    }
-
-    return true;
-}
-
-QByteArray ClipboardInspectorDialog::requestStoredPayload(
-    const FormatSnapshot &snapshot, QString *error, bool *truncated,
-    qint64 *originalSize) const {
-    if (error) {
-        error->clear();
-    }
-    if (truncated) {
-        *truncated = false;
-    }
-    if (originalSize) {
-        *originalSize = 0;
-    }
+    snapshot.payloadLoading = true;
 
     QCborMap params;
     params.insert(QStringLiteral("blob_hash"), snapshot.blobHash);
     params.insert(QStringLiteral("mime_type"), snapshot.mimeType);
     params.insert(QStringLiteral("max_bytes"), kMaxPayloadBytes);
 
-    QString requestError;
-    const QCborMap result =
-        m_client.request(QStringLiteral("GetFormatPayload"), params, 3000, &requestError);
-    if (!requestError.isEmpty()) {
-        if (error) {
-            *error = requestError;
-        }
-        return {};
-    }
+    m_ipcRunner->request(
+        QStringLiteral("GetFormatPayload"), params, 3000, this,
+        [this, index](const QCborMap &result, const QString &error) {
+            if (index < 0 || index >= m_snapshots.size()) {
+                return;
+            }
 
-    if (truncated) {
-        *truncated = result.value(QStringLiteral("truncated")).toBool();
-    }
-    if (originalSize) {
-        *originalSize = result.value(QStringLiteral("original_size")).toInteger();
-    }
+            FormatSnapshot &updated = m_snapshots[index];
+            updated.payloadLoading = false;
 
-    return result.value(QStringLiteral("bytes")).toByteArray();
+            if (!error.isEmpty()) {
+                updated.payloadFetched = true;
+                updated.payload.clear();
+                updated.textPreview = QStringLiteral("Failed to load payload: %1").arg(error);
+                updated.textTruncated = false;
+            } else {
+                updated.payloadFetched = true;
+                updated.payload = result.value(QStringLiteral("bytes")).toByteArray();
+                updated.payloadTruncated = result.value(QStringLiteral("truncated")).toBool();
+                updated.payloadOriginalSize = result.value(QStringLiteral("original_size")).toInteger();
+                if (updated.byteSize <= 0) {
+                    updated.byteSize = updated.payloadOriginalSize;
+                }
+                populateSnapshotFromPayload(&updated);
+            }
+
+            if (updated.kind == QLatin1String("Image") && !updated.blobHash.isEmpty() &&
+                updated.imagePreview.isNull()) {
+                requestStoredImagePreview(index);
+            }
+
+            if (m_table->currentRow() == index) {
+                updateSelectedDetails();
+            }
+        });
 }
 
-QImage ClipboardInspectorDialog::requestStoredImagePreview(const QString &blobHash,
-                                                           QString *error) const {
-    if (error) {
-        error->clear();
+void ClipboardInspectorDialog::requestStoredImagePreview(int index) {
+    if (!m_ipcRunner || index < 0 || index >= m_snapshots.size()) {
+        return;
     }
+
+    FormatSnapshot &snapshot = m_snapshots[index];
+    if (snapshot.imageLoading || !snapshot.imagePreview.isNull() || snapshot.blobHash.isEmpty()) {
+        return;
+    }
+    snapshot.imageLoading = true;
 
     QCborMap params;
-    params.insert(QStringLiteral("blob_hash"), blobHash);
+    params.insert(QStringLiteral("blob_hash"), snapshot.blobHash);
     params.insert(QStringLiteral("max_edge"), 420);
 
-    QString requestError;
-    const QCborMap result =
-        m_client.request(QStringLiteral("GetImagePreview"), params, 2000, &requestError);
-    if (!requestError.isEmpty()) {
-        if (error) {
-            *error = requestError;
-        }
-        return {};
-    }
+    m_ipcRunner->request(
+        QStringLiteral("GetImagePreview"), params, 2000, this,
+        [this, index](const QCborMap &result, const QString &error) {
+            if (index < 0 || index >= m_snapshots.size()) {
+                return;
+            }
 
-    const QByteArray bytes = result.value(QStringLiteral("bytes")).toByteArray();
-    if (bytes.isEmpty()) {
-        if (error) {
-            *error = QStringLiteral("Empty image payload");
-        }
-        return {};
-    }
+            FormatSnapshot &updated = m_snapshots[index];
+            updated.imageLoading = false;
 
-    const QImage image = QImage::fromData(bytes);
-    if (image.isNull()) {
-        if (error) {
-            *error = QStringLiteral("Failed to decode image preview");
-        }
-        return {};
-    }
+            if (error.isEmpty()) {
+                const QByteArray bytes = result.value(QStringLiteral("bytes")).toByteArray();
+                const QImage image = QImage::fromData(bytes);
+                if (!image.isNull()) {
+                    updated.imagePreview = image;
+                }
+            }
 
-    return image;
+            if (m_table->currentRow() == index) {
+                updateSelectedDetails();
+            }
+        });
 }
 
 void ClipboardInspectorDialog::appendSnapshotRow(int row,
@@ -718,16 +703,14 @@ void ClipboardInspectorDialog::updateSelectedDetails() {
         return;
     }
 
-    QString payloadError;
-    if (currentSourceMode() == SourceMode::StoredEntry &&
-        !ensureStoredPayloadLoaded(row, &payloadError)) {
+    FormatSnapshot &snapshot = m_snapshots[row];
+    if (currentSourceMode() == SourceMode::StoredEntry && !snapshot.payloadFetched) {
+        requestStoredPayload(row);
         clearDetails();
-        m_detailView->setPlainText(
-            QStringLiteral("Failed to load format payload:\n%1").arg(payloadError));
+        m_detailView->setPlainText(QStringLiteral("Loading format payload..."));
         return;
     }
 
-    FormatSnapshot &snapshot = m_snapshots[row];
     if (currentSourceMode() == SourceMode::StoredEntry) {
         if (auto *kindItem = m_table->item(row, 2)) {
             kindItem->setText(snapshot.kind);
@@ -779,6 +762,11 @@ void ClipboardInspectorDialog::updateSelectedDetails() {
 
     m_detailView->setPlainText(detail.join('\n'));
 
+    if (snapshot.kind == QLatin1String("Image") && snapshot.imagePreview.isNull() &&
+        !snapshot.blobHash.isEmpty()) {
+        requestStoredImagePreview(row);
+    }
+
     if (!snapshot.imagePreview.isNull()) {
         const QSize maxSize(460, 240);
         const QPixmap pixmap = QPixmap::fromImage(snapshot.imagePreview);
@@ -793,7 +781,8 @@ void ClipboardInspectorDialog::updateSelectedDetails() {
     }
 
     m_imagePreviewLabel->clear();
-    m_imagePreviewLabel->setText(QStringLiteral("No image preview"));
+    m_imagePreviewLabel->setText(snapshot.imageLoading ? QStringLiteral("Loading image preview...")
+                                                       : QStringLiteral("No image preview"));
     m_imagePreviewLabel->setToolTip(QString());
 }
 

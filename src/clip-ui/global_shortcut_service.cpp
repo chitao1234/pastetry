@@ -13,6 +13,7 @@
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <xcb/xcb.h>
+#include <algorithm>
 #endif
 
 Q_LOGGING_CATEGORY(logShortcut, "pastetry.shortcut")
@@ -181,22 +182,27 @@ QString x11ErrorCodeText(Display *display, int errorCode) {
     return QStringLiteral("X11 error code %1").arg(errorCode);
 }
 
-unsigned int detectNumLockMask(Display *display) {
+unsigned int detectModifierMask(Display *display, KeySym targetSym) {
     if (!display) {
         return 0;
     }
 
-    unsigned int mask = 0;
     XModifierKeymap *modMap = XGetModifierMapping(display);
     if (!modMap) {
         return 0;
     }
 
-    const KeyCode numLock = XKeysymToKeycode(display, XK_Num_Lock);
+    const KeyCode targetCode = XKeysymToKeycode(display, targetSym);
+    if (targetCode == 0) {
+        XFreeModifiermap(modMap);
+        return 0;
+    }
+
+    unsigned int mask = 0;
     for (int modIndex = 0; modIndex < 8; ++modIndex) {
         for (int keyIndex = 0; keyIndex < modMap->max_keypermod; ++keyIndex) {
             const int offset = modIndex * modMap->max_keypermod + keyIndex;
-            if (modMap->modifiermap[offset] == numLock) {
+            if (modMap->modifiermap[offset] == targetCode) {
                 mask = static_cast<unsigned int>(1U << modIndex);
                 break;
             }
@@ -208,6 +214,49 @@ unsigned int detectNumLockMask(Display *display) {
 
     XFreeModifiermap(modMap);
     return mask;
+}
+
+unsigned int detectIgnoredX11Mask(Display *display) {
+    unsigned int ignored = 0;
+    ignored |= detectModifierMask(display, XK_Num_Lock);
+    ignored |= detectModifierMask(display, XK_Scroll_Lock);
+    ignored |= detectModifierMask(display, XK_Mode_switch);
+    ignored |= detectModifierMask(display, XK_ISO_Level3_Shift);
+    ignored |= detectModifierMask(display, XK_ISO_Level5_Shift);
+
+    // Never ignore the primary modifiers that bindings explicitly use.
+    ignored &= ~(ShiftMask | ControlMask | Mod1Mask | Mod4Mask);
+    return ignored;
+}
+
+QVector<unsigned int> buildGrabVariants(unsigned int toggledMaskBits) {
+    QVector<unsigned int> bits;
+    bits.reserve(8);
+    for (int bit = 0; bit < 32; ++bit) {
+        const unsigned int mask = (1U << bit);
+        if ((toggledMaskBits & mask) != 0U) {
+            bits.push_back(mask);
+        }
+    }
+
+    QVector<unsigned int> variants;
+    const int variantCount = 1 << bits.size();
+    variants.reserve(std::max(1, variantCount));
+
+    for (int i = 0; i < variantCount; ++i) {
+        unsigned int combined = 0;
+        for (int bitIndex = 0; bitIndex < bits.size(); ++bitIndex) {
+            if ((i & (1 << bitIndex)) != 0) {
+                combined |= bits[bitIndex];
+            }
+        }
+        variants.push_back(combined);
+    }
+
+    if (variants.isEmpty()) {
+        variants.push_back(0);
+    }
+    return variants;
 }
 #endif
 
@@ -422,7 +471,9 @@ bool GlobalShortcutService::nativeEventFilter(const QByteArray &eventType, void 
             return false;
         }
 
-        const unsigned int ignoredMasks = LockMask | m_x11NumLockMask;
+        const unsigned int pointerMasks =
+            Button1Mask | Button2Mask | Button3Mask | Button4Mask | Button5Mask;
+        const unsigned int ignoredMasks = LockMask | m_x11IgnoredMask | pointerMasks;
         const unsigned int normalized = keyEvent->state & ~ignoredMasks;
         if (normalized != m_x11Modifiers) {
             return false;
@@ -529,17 +580,16 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
     }
 
     const Window root = DefaultRootWindow(display);
-    m_x11NumLockMask = detectNumLockMask(display);
+    m_x11IgnoredMask = detectIgnoredX11Mask(display);
+    m_x11GrabVariants = buildGrabVariants(LockMask | m_x11IgnoredMask);
 
     int grabErrorCode = 0;
     g_x11GrabErrorCode = &grabErrorCode;
     int (*oldErrorHandler)(Display *, XErrorEvent *) =
         XSetErrorHandler(x11GrabErrorHandler);
 
-    const unsigned int lockVariants[] = {0, LockMask, m_x11NumLockMask,
-                                         LockMask | m_x11NumLockMask};
-    for (const unsigned int lockMask : lockVariants) {
-        XGrabKey(display, keyCode, nativeMods | lockMask, root, True, GrabModeAsync,
+    for (const unsigned int variantMask : m_x11GrabVariants) {
+        XGrabKey(display, keyCode, nativeMods | variantMask, root, False, GrabModeAsync,
                  GrabModeAsync);
     }
     XSync(display, False);
@@ -547,10 +597,12 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
     g_x11GrabErrorCode = nullptr;
 
     if (grabErrorCode != 0) {
-        for (const unsigned int lockMask : lockVariants) {
-            XUngrabKey(display, static_cast<int>(keyCode), nativeMods | lockMask, root);
+        for (const unsigned int variantMask : m_x11GrabVariants) {
+            XUngrabKey(display, static_cast<int>(keyCode), nativeMods | variantMask, root);
         }
         XSync(display, False);
+        m_x11GrabVariants.clear();
+        m_x11IgnoredMask = 0;
         m_lastError = QStringLiteral("X11 refused shortcut (%1)")
                           .arg(x11ErrorCodeText(display, grabErrorCode));
         return ShortcutRegistrationState::Failed;
@@ -598,9 +650,7 @@ void GlobalShortcutService::unregisterX11Shortcut() {
         Display *display = x11->display();
         const Window root = DefaultRootWindow(display);
 
-        const unsigned int lockVariants[] = {0, LockMask, m_x11NumLockMask,
-                                             LockMask | m_x11NumLockMask};
-        for (const unsigned int lockMask : lockVariants) {
+        for (const unsigned int lockMask : m_x11GrabVariants) {
             XUngrabKey(display, static_cast<int>(m_x11Keycode),
                        m_x11Modifiers | lockMask, root);
         }
@@ -610,7 +660,8 @@ void GlobalShortcutService::unregisterX11Shortcut() {
     m_x11Registered = false;
     m_x11Modifiers = 0;
     m_x11Keycode = 0;
-    m_x11NumLockMask = 0;
+    m_x11IgnoredMask = 0;
+    m_x11GrabVariants.clear();
 #endif
 }
 

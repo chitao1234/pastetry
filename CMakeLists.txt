@@ -39,6 +39,7 @@ add_executable(pastetry-clip-ui
     src/clip-ui/app_controller.cpp
     src/clip-ui/clipboard_inspector_dialog.cpp
     src/clip-ui/global_shortcut_service.cpp
+    src/clip-ui/ipc_async_runner.cpp
     src/clip-ui/main.cpp
     src/clip-ui/history_model.cpp
     src/clip-ui/main_window.cpp

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/ipc_client.h"
+#include "clip-ui/ipc_async_runner.h"
 
 #include <QCborMap>
 #include <QClipboard>
@@ -29,7 +29,7 @@ public:
         StoredEntry = 1,
     };
 
-    explicit ClipboardInspectorDialog(IpcClient client, QWidget *parent = nullptr);
+    explicit ClipboardInspectorDialog(IpcAsyncRunner *ipcRunner, QWidget *parent = nullptr);
 
     void inspectClipboard();
     void inspectEntry(qint64 entryId);
@@ -42,6 +42,7 @@ private:
         QString blobHash;
 
         bool payloadFetched = false;
+        bool payloadLoading = false;
         QByteArray payload;
         bool payloadTruncated = false;
         qint64 payloadOriginalSize = 0;
@@ -50,6 +51,7 @@ private:
         QString textPreview;
         QStringList urlPreview;
         QImage imagePreview;
+        bool imageLoading = false;
         bool textTruncated = false;
     };
 
@@ -74,16 +76,12 @@ private:
                                               const QMimeData *mimeData) const;
     void populateSnapshotFromPayload(FormatSnapshot *snapshot) const;
 
-    bool ensureStoredPayloadLoaded(int index, QString *error);
-    QByteArray requestStoredPayload(const FormatSnapshot &snapshot, QString *error,
-                                    bool *truncated,
-                                    qint64 *originalSize) const;
-    QImage requestStoredImagePreview(const QString &blobHash,
-                                     QString *error) const;
+    void requestStoredPayload(int index);
+    void requestStoredImagePreview(int index);
 
     void updateSelectedDetails();
 
-    IpcClient m_client;
+    IpcAsyncRunner *m_ipcRunner = nullptr;
     QClipboard *m_clipboard = nullptr;
 
     qint64 m_entryId = -1;
@@ -101,6 +99,8 @@ private:
     QLabel *m_imagePreviewLabel = nullptr;
 
     QVector<FormatSnapshot> m_snapshots;
+    bool m_entryDetailInFlight = false;
+    qint64 m_entryDetailRequestId = 0;
 };
 
 }  // namespace pastetry
