@@ -409,6 +409,11 @@ void QuickPasteDialog::hideEvent(QHideEvent *event) {
 
 bool QuickPasteDialog::event(QEvent *event) {
     if (event->type() == QEvent::WindowDeactivate && isVisible()) {
+        // Drag gestures can temporarily deactivate the tool window; keep it open
+        // until the drag interaction ends.
+        if (QGuiApplication::mouseButtons() != Qt::NoButton) {
+            return true;
+        }
         hide();
         return true;
     }
