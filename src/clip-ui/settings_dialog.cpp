@@ -114,13 +114,31 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     });
     connect(m_shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this,
             &SettingsDialog::shortcutEdited);
+    connect(m_shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this,
+            [this] { refreshApplyButtonState(); });
+    connect(m_startToTray, &QCheckBox::toggled, this,
+            [this] { refreshApplyButtonState(); });
+    connect(m_previewLines, qOverload<int>(&QSpinBox::valueChanged), this,
+            [this](int) { refreshApplyButtonState(); });
+    connect(m_regexStrictFullScan, &QCheckBox::toggled, this,
+            [this] { refreshApplyButtonState(); });
+    for (auto *check : m_historyColumnChecks) {
+        connect(check, &QCheckBox::toggled, this,
+                [this] { refreshApplyButtonState(); });
+    }
+    for (auto *check : m_quickPasteColumnChecks) {
+        connect(check, &QCheckBox::toggled, this,
+                [this] { refreshApplyButtonState(); });
+    }
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    if (QAbstractButton *applyButton = buttons->button(QDialogButtonBox::Apply)) {
-        connect(applyButton, &QAbstractButton::clicked, this,
+    m_applyButton = buttons->button(QDialogButtonBox::Apply);
+    if (m_applyButton) {
+        connect(m_applyButton, &QAbstractButton::clicked, this,
                 &SettingsDialog::applyRequested);
     }
+    refreshApplyButtonState();
 }
 
 void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
@@ -129,6 +147,7 @@ void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
                                const QVector<bool> &quickPasteColumns,
                                int previewLineCount,
                                bool regexStrictFullScan) {
+    m_loadingValues = true;
     m_shortcutEdit->setKeySequence(shortcut);
     m_startToTray->setChecked(startToTray);
     setShortcutStatusText(shortcutStatusText);
@@ -145,6 +164,15 @@ void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
 
     m_previewLines->setValue(qBound(1, previewLineCount, 12));
     m_regexStrictFullScan->setChecked(regexStrictFullScan);
+
+    m_savedShortcut = shortcut;
+    m_savedStartToTray = startToTray;
+    m_savedHistoryColumns = columnsFromChecks(m_historyColumnChecks);
+    m_savedQuickPasteColumns = columnsFromChecks(m_quickPasteColumnChecks);
+    m_savedPreviewLines = m_previewLines->value();
+    m_savedRegexStrictFullScan = regexStrictFullScan;
+    m_loadingValues = false;
+    refreshApplyButtonState();
 }
 
 void SettingsDialog::setShortcutStatusText(const QString &shortcutStatusText) {
@@ -182,6 +210,23 @@ int SettingsDialog::previewLineCount() const {
 
 bool SettingsDialog::regexStrictFullScanEnabled() const {
     return m_regexStrictFullScan->isChecked();
+}
+
+bool SettingsDialog::hasUnsavedChanges() const {
+    return shortcut() != m_savedShortcut || startToTray() != m_savedStartToTray ||
+           historyColumns() != m_savedHistoryColumns ||
+           quickPasteColumns() != m_savedQuickPasteColumns ||
+           previewLineCount() != m_savedPreviewLines ||
+           regexStrictFullScanEnabled() != m_savedRegexStrictFullScan;
+}
+
+void SettingsDialog::refreshApplyButtonState() {
+    if (!m_applyButton) {
+        return;
+    }
+
+    const bool enabled = !m_loadingValues && hasUnsavedChanges();
+    m_applyButton->setEnabled(enabled);
 }
 
 }  // namespace pastetry

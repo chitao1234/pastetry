@@ -247,8 +247,9 @@ void AppController::openSettings() {
         applyViewSettings();
         applyShortcutSetting();
         saveSettings();
-
-        dialog.setShortcutStatusText(shortcutStatusText());
+        dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
+                         m_historyColumns, m_quickPasteColumns, m_previewLineCount,
+                         m_regexStrictFullScan);
     };
 
     connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
