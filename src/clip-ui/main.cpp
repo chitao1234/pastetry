@@ -1,6 +1,7 @@
 #include "clip-ui/app_controller.h"
 
 #include "common/app_paths.h"
+#include "common/logging.h"
 
 #include <QApplication>
 #include <QCommandLineOption>
@@ -29,16 +30,29 @@ int main(int argc, char **argv) {
 
     QApplication::setQuitOnLastWindowClosed(false);
 
+    QString logError;
+    if (!pastetry::logging::initialize(QStringLiteral("pastetry-clip-ui"), paths.dataDir,
+                                       &logError)) {
+        QMessageBox::critical(nullptr, QStringLiteral("Pastetry startup failed"),
+                              QStringLiteral("Failed to initialize logging: %1")
+                                  .arg(logError));
+        return 1;
+    }
+
     pastetry::AppController controller(paths);
     QString error;
     const bool shouldRun = controller.initialize(&error);
     if (!shouldRun) {
         if (!error.isEmpty()) {
             QMessageBox::critical(nullptr, QStringLiteral("Pastetry startup failed"), error);
+            pastetry::logging::shutdown();
             return 1;
         }
+        pastetry::logging::shutdown();
         return 0;
     }
 
-    return QApplication::exec();
+    const int exitCode = QApplication::exec();
+    pastetry::logging::shutdown();
+    return exitCode;
 }

@@ -95,3 +95,9 @@ Optional arguments for both binaries:
 - This implementation is C++20 + Qt Widgets only.
 - Hashing currently uses SHA-256 for blob identity/dedup.
 - Clipboard source app/window metadata is stored as `unknown`/empty in this prototype.
+- Logging:
+  - `pastetry-clipd`: `<data-dir>/logs/pastetry-clipd.log`
+  - `pastetry-clip-ui`: `<data-dir>/logs/pastetry-clip-ui.log`
+  - logs also mirror to stderr
+  - rotation keeps one backup at `*.log.1` when log reaches 5 MB
+  - optional filter rules via env: `PASTETRY_LOG_RULES`

@@ -15,6 +15,7 @@ add_library(pastetry_common
     src/common/clipboard_repository.cpp
     src/common/ipc_client.cpp
     src/common/ipc_protocol.cpp
+    src/common/logging.cpp
 )
 
 target_include_directories(pastetry_common PUBLIC src)
