@@ -8,6 +8,8 @@
 #include <QApplication>
 #include <QCborArray>
 #include <QCborMap>
+#include <QCoreApplication>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QHash>
 #include <QIcon>
@@ -15,11 +17,13 @@
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMessageBox>
+#include <QProcess>
 #include <QPushButton>
 #include <QStyle>
 #include <QSystemTrayIcon>
 
 #ifdef Q_OS_WIN
+#include <tlhelp32.h>
 #include <windows.h>
 #endif
 
@@ -496,29 +500,54 @@ bool AppController::initialize(QString *error) {
             return false;
         }
 
-        while (true) {
-            const InstanceTakeoverDecision decision =
-                promptSingleInstanceTakeover(handoffError);
-            if (decision == InstanceTakeoverDecision::Exit) {
-                if (error) {
-                    error->clear();
-                }
-                return false;
-            }
-
-            if (decision == InstanceTakeoverDecision::RetryHandoff) {
-                handoffError.clear();
-                if (notifyExistingInstance(300, &handoffError)) {
-                    return false;
-                }
-                continue;
-            }
-
+        QString processProbeDetail;
+        const bool peerRunning = hasLikelyPeerUiProcess(&processProbeDetail);
+        if (!peerRunning) {
+            qWarning().noquote()
+                << QStringLiteral("Single-instance socket looked in-use but no peer UI process "
+                                  "was found; taking over stale socket. Handoff detail: %1. "
+                                  "Process probe: %2")
+                       .arg(handoffError.trimmed().isEmpty() ? QStringLiteral("Unknown")
+                                                             : handoffError.trimmed(),
+                            processProbeDetail.trimmed().isEmpty()
+                                ? QStringLiteral("No peer process detected")
+                                : processProbeDetail.trimmed());
             QLocalServer::removeServer(m_singleInstanceName);
             if (!startSingleInstanceServer(error)) {
                 return false;
             }
-            break;
+        } else {
+            if (!processProbeDetail.trimmed().isEmpty()) {
+                handoffError =
+                    handoffError.trimmed().isEmpty()
+                        ? processProbeDetail
+                        : QStringLiteral("%1\n%2").arg(handoffError.trimmed(), processProbeDetail);
+            }
+
+            while (true) {
+                const InstanceTakeoverDecision decision =
+                    promptSingleInstanceTakeover(handoffError);
+                if (decision == InstanceTakeoverDecision::Exit) {
+                    if (error) {
+                        error->clear();
+                    }
+                    return false;
+                }
+
+                if (decision == InstanceTakeoverDecision::RetryHandoff) {
+                    handoffError.clear();
+                    if (notifyExistingInstance(300, &handoffError)) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                QLocalServer::removeServer(m_singleInstanceName);
+                if (!startSingleInstanceServer(error)) {
+                    return false;
+                }
+                break;
+            }
         }
     }
 
@@ -922,6 +951,129 @@ bool AppController::notifyExistingInstance(int timeoutMs, QString *error) {
         error->clear();
     }
     return true;
+}
+
+bool AppController::hasLikelyPeerUiProcess(QString *detail) const {
+    const qint64 selfPid = QCoreApplication::applicationPid();
+    const QString executableName =
+        QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+    if (executableName.trimmed().isEmpty()) {
+        if (detail) {
+            *detail = QStringLiteral("Unable to determine current executable name");
+        }
+        return true;
+    }
+
+#ifdef Q_OS_WIN
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        if (detail) {
+            *detail = QStringLiteral("Process probe unavailable (snapshot failed)");
+        }
+        return true;
+    }
+
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(entry);
+    QVector<qint64> peerPids;
+    const QString targetLower = executableName.toLower();
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            const qint64 pid = static_cast<qint64>(entry.th32ProcessID);
+            if (pid == selfPid) {
+                continue;
+            }
+
+            const QString candidate =
+                QString::fromWCharArray(entry.szExeFile).trimmed().toLower();
+            if (candidate == targetLower) {
+                peerPids.push_back(pid);
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+
+    if (peerPids.isEmpty()) {
+        if (detail) {
+            *detail = QStringLiteral("No peer UI process found");
+        }
+        return false;
+    }
+
+    if (detail) {
+        QStringList pidStrings;
+        for (qint64 pid : peerPids) {
+            pidStrings.push_back(QString::number(pid));
+        }
+        *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
+    }
+    return true;
+#else
+    QProcess ps;
+    ps.start(QStringLiteral("ps"),
+             QStringList{QStringLiteral("-eo"), QStringLiteral("pid=,args=")});
+    if (!ps.waitForStarted(1000)) {
+        if (detail) {
+            *detail = QStringLiteral("Process probe unavailable (ps did not start)");
+        }
+        return true;
+    }
+    if (!ps.waitForFinished(2000)) {
+        ps.kill();
+        ps.waitForFinished(500);
+        if (detail) {
+            *detail = QStringLiteral("Process probe unavailable (ps timed out)");
+        }
+        return true;
+    }
+
+    QVector<qint64> peerPids;
+    const QString output = QString::fromUtf8(ps.readAllStandardOutput());
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty()) {
+            continue;
+        }
+
+        const int firstSpace = trimmed.indexOf(' ');
+        if (firstSpace <= 0) {
+            continue;
+        }
+
+        bool ok = false;
+        const qint64 pid = trimmed.left(firstSpace).toLongLong(&ok);
+        if (!ok || pid == selfPid) {
+            continue;
+        }
+
+        const QString args = trimmed.mid(firstSpace + 1).trimmed();
+        if (args.isEmpty()) {
+            continue;
+        }
+
+        const QString commandToken = args.section(' ', 0, 0);
+        const QString commandName = QFileInfo(commandToken).fileName();
+        if (commandName == executableName) {
+            peerPids.push_back(pid);
+        }
+    }
+
+    if (peerPids.isEmpty()) {
+        if (detail) {
+            *detail = QStringLiteral("No peer UI process found");
+        }
+        return false;
+    }
+
+    if (detail) {
+        QStringList pidStrings;
+        for (qint64 pid : peerPids) {
+            pidStrings.push_back(QString::number(pid));
+        }
+        *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
+    }
+    return true;
+#endif
 }
 
 bool AppController::startSingleInstanceServer(QString *error) {

@@ -42,6 +42,7 @@ private:
     };
 
     bool notifyExistingInstance(int timeoutMs, QString *error = nullptr);
+    bool hasLikelyPeerUiProcess(QString *detail = nullptr) const;
     bool startSingleInstanceServer(QString *error);
     InstanceTakeoverDecision promptSingleInstanceTakeover(const QString &detail);
     void handleSingleInstanceCommand(const QString &command);
