@@ -48,9 +48,12 @@ protected:
 private:
     void refreshResults();
     void activateCurrent();
+    void pinSelected();
+    void deleteSelected();
     qint64 selectedEntryId() const;
     void applyTableLayout();
     void showHeaderContextMenu(const QPoint &position);
+    void showEntryContextMenu(const QPoint &position);
     void setSearchError(const QString &message);
     void syncSearchModeCombo();
 

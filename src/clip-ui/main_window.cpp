@@ -126,6 +126,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
                                                       QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PinnedColumn,
                                                       QHeaderView::ResizeToContents);
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
     layout->addLayout(toolbar);
@@ -156,6 +157,8 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     connect(m_deleteButton, &QPushButton::clicked, this, &MainWindow::deleteSelected);
     connect(m_clearButton, &QPushButton::clicked, this, &MainWindow::clearHistory);
     connect(m_table, &QTableView::doubleClicked, this, [this] { activateSelected(); });
+    connect(m_table, &QTableView::customContextMenuRequested, this,
+            &MainWindow::showEntryContextMenu);
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &MainWindow::showHeaderContextMenu);
 
@@ -336,6 +339,39 @@ void MainWindow::showHeaderContextMenu(const QPoint &position) {
     }
 
     menu.exec(header->mapToGlobal(position));
+}
+
+void MainWindow::showEntryContextMenu(const QPoint &position) {
+    const QModelIndex clicked = m_table->indexAt(position);
+    if (!clicked.isValid()) {
+        return;
+    }
+
+    m_table->selectRow(clicked.row());
+    const bool pinned = m_model->pinnedAt(clicked.row());
+
+    QMenu menu(this);
+    QAction *activateAction = menu.addAction(QStringLiteral("Activate"));
+    QAction *pinAction = menu.addAction(pinned ? QStringLiteral("Unpin")
+                                               : QStringLiteral("Pin"));
+    QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
+
+    QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
+    if (!chosen) {
+        return;
+    }
+
+    if (chosen == activateAction) {
+        activateSelected();
+        return;
+    }
+    if (chosen == pinAction) {
+        pinSelected();
+        return;
+    }
+    if (chosen == deleteAction) {
+        deleteSelected();
+    }
 }
 
 void MainWindow::loadInitial() {

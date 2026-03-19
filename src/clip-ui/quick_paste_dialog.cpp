@@ -110,6 +110,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
                                                       QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PinnedColumn,
                                                       QHeaderView::ResizeToContents);
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
     searchRow->addWidget(m_searchEdit, 1);
@@ -138,6 +139,8 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
             &QuickPasteDialog::activateCurrent);
     connect(m_table, &QTableView::doubleClicked, this,
             [this] { activateCurrent(); });
+    connect(m_table, &QTableView::customContextMenuRequested, this,
+            &QuickPasteDialog::showEntryContextMenu);
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &QuickPasteDialog::showHeaderContextMenu);
     connect(m_searchModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
@@ -311,6 +314,47 @@ void QuickPasteDialog::activateCurrent() {
     hide();
 }
 
+void QuickPasteDialog::pinSelected() {
+    const auto indexes = m_table->selectionModel()->selectedRows();
+    if (indexes.isEmpty()) {
+        return;
+    }
+
+    const int row = indexes.first().row();
+    const qint64 id = m_model->idAt(row);
+    const bool currentlyPinned = m_model->pinnedAt(row);
+
+    QString error;
+    QCborMap params;
+    params.insert(QStringLiteral("entry_id"), id);
+    params.insert(QStringLiteral("pinned"), !currentlyPinned);
+    m_client.request(QStringLiteral("PinEntry"), params, 2500, &error);
+    if (!error.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Pin failed: %1").arg(error));
+        return;
+    }
+
+    refreshResults();
+}
+
+void QuickPasteDialog::deleteSelected() {
+    const qint64 id = selectedEntryId();
+    if (id < 0) {
+        return;
+    }
+
+    QString error;
+    QCborMap params;
+    params.insert(QStringLiteral("entry_id"), id);
+    m_client.request(QStringLiteral("DeleteEntry"), params, 2500, &error);
+    if (!error.isEmpty()) {
+        emit errorOccurred(QStringLiteral("Delete failed: %1").arg(error));
+        return;
+    }
+
+    refreshResults();
+}
+
 void QuickPasteDialog::applyTableLayout() {
     for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
         const bool visible = column < m_visibleColumns.size() ? m_visibleColumns.at(column) : true;
@@ -387,6 +431,39 @@ void QuickPasteDialog::showHeaderContextMenu(const QPoint &position) {
     }
 
     menu.exec(header->mapToGlobal(position));
+}
+
+void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
+    const QModelIndex clicked = m_table->indexAt(position);
+    if (!clicked.isValid()) {
+        return;
+    }
+
+    m_table->selectRow(clicked.row());
+    const bool pinned = m_model->pinnedAt(clicked.row());
+
+    QMenu menu(this);
+    QAction *activateAction = menu.addAction(QStringLiteral("Activate"));
+    QAction *pinAction = menu.addAction(pinned ? QStringLiteral("Unpin")
+                                               : QStringLiteral("Pin"));
+    QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
+
+    QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
+    if (!chosen) {
+        return;
+    }
+
+    if (chosen == activateAction) {
+        activateCurrent();
+        return;
+    }
+    if (chosen == pinAction) {
+        pinSelected();
+        return;
+    }
+    if (chosen == deleteAction) {
+        deleteSelected();
+    }
 }
 
 }  // namespace pastetry
