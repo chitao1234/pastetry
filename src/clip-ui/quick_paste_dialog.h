@@ -73,6 +73,8 @@ private:
     void inspectEntry(qint64 entryId);
     void setSearchError(const QString &message);
     void syncSearchModeCombo();
+    void scheduleDeferredHide();
+    void cancelDeferredHide();
 
     IpcAsyncRunner *m_ipcRunner = nullptr;
     HistoryModel *m_model = nullptr;
@@ -83,6 +85,7 @@ private:
     PreviewTextDelegate *m_previewDelegate = nullptr;
     QTimer *m_searchTimer = nullptr;
     QTimer *m_newHighlightTimer = nullptr;
+    QTimer *m_deferredHideTimer = nullptr;
     ClipboardInspectorDialog *m_clipboardInspectorDialog = nullptr;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;

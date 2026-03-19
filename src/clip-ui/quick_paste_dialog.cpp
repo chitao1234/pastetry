@@ -209,6 +209,21 @@ QuickPasteDialog::QuickPasteDialog(IpcAsyncRunner *ipcRunner, QWidget *parent)
     m_newHighlightTimer = new QTimer(this);
     m_newHighlightTimer->setInterval(1000);
     m_newHighlightTimer->start();
+    m_deferredHideTimer = new QTimer(this);
+    m_deferredHideTimer->setSingleShot(true);
+    m_deferredHideTimer->setInterval(180);
+    connect(m_deferredHideTimer, &QTimer::timeout, this, [this] {
+        if (!isVisible()) {
+            return;
+        }
+        if (QGuiApplication::mouseButtons() != Qt::NoButton) {
+            return;
+        }
+        if (isActiveWindow()) {
+            return;
+        }
+        hide();
+    });
 
     connect(m_searchEdit, &QLineEdit::textChanged, this,
             [this] { m_searchTimer->start(); });
@@ -342,6 +357,7 @@ bool QuickPasteDialog::hasLastPopupPosition() const {
 }
 
 void QuickPasteDialog::openPopup() {
+    cancelDeferredHide();
     if (!isVisible()) {
         QPoint topLeft;
         bool hasTopLeft = false;
@@ -376,6 +392,7 @@ void QuickPasteDialog::openPopup() {
 }
 
 void QuickPasteDialog::togglePopup() {
+    cancelDeferredHide();
     if (isVisible()) {
         hide();
         return;
@@ -402,6 +419,7 @@ void QuickPasteDialog::keyPressEvent(QKeyEvent *event) {
 
 void QuickPasteDialog::hideEvent(QHideEvent *event) {
     QDialog::hideEvent(event);
+    cancelDeferredHide();
     m_lastPopupPosition = pos();
     m_hasLastPopupPosition = true;
     emit popupHidden();
@@ -409,16 +427,36 @@ void QuickPasteDialog::hideEvent(QHideEvent *event) {
 
 bool QuickPasteDialog::event(QEvent *event) {
     if (event->type() == QEvent::WindowDeactivate && isVisible()) {
-        // Drag gestures can temporarily deactivate the tool window; keep it open
-        // until the drag interaction ends.
-        if (QGuiApplication::mouseButtons() != Qt::NoButton) {
-            return true;
-        }
-        hide();
+        scheduleDeferredHide();
         return true;
     }
 
+    if (event->type() == QEvent::WindowActivate ||
+        event->type() == QEvent::MouseMove ||
+        event->type() == QEvent::Move ||
+        event->type() == QEvent::Enter ||
+        event->type() == QEvent::MouseButtonPress ||
+        event->type() == QEvent::MouseButtonRelease ||
+        event->type() == QEvent::DragMove ||
+        event->type() == QEvent::DragEnter) {
+        cancelDeferredHide();
+    }
+
     return QDialog::event(event);
+}
+
+void QuickPasteDialog::scheduleDeferredHide() {
+    if (!m_deferredHideTimer) {
+        return;
+    }
+    m_deferredHideTimer->start();
+}
+
+void QuickPasteDialog::cancelDeferredHide() {
+    if (!m_deferredHideTimer || !m_deferredHideTimer->isActive()) {
+        return;
+    }
+    m_deferredHideTimer->stop();
 }
 
 qint64 QuickPasteDialog::selectedEntryId() const {
