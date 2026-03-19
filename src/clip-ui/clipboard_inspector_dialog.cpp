@@ -305,7 +305,7 @@ ClipboardInspectorDialog::ClipboardInspectorDialog(IpcClient client, QWidget *pa
                 });
     }
 
-    inspectClipboard();
+    refresh();
 }
 
 ClipboardInspectorDialog::SourceMode ClipboardInspectorDialog::currentSourceMode() const {
