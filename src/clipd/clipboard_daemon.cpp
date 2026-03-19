@@ -561,6 +561,51 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         return ipc::makeResponse(id, payload);
     }
 
+    if (method == "MovePinnedEntry") {
+        const qint64 entryId = params.value(QStringLiteral("entry_id")).toInteger();
+        const int targetIndex = params.value(QStringLiteral("target_index")).toInteger();
+        if (entryId <= 0) {
+            return ipc::makeError(id, QStringLiteral("entry_id must be > 0"));
+        }
+        if (targetIndex < 0) {
+            return ipc::makeError(id, QStringLiteral("target_index must be >= 0"));
+        }
+        if (!m_repo.movePinnedEntry(entryId, targetIndex, &error)) {
+            return ipc::makeError(id, error.isEmpty() ? QStringLiteral("Move pinned failed")
+                                                     : error);
+        }
+        QCborMap payload;
+        payload.insert(QStringLiteral("status"), QStringLiteral("ok"));
+        return ipc::makeResponse(id, payload);
+    }
+
+    if (method == "ResolveSlotEntry") {
+        const QString group = params.value(QStringLiteral("group")).toString().trimmed();
+        const int slot = params.value(QStringLiteral("slot")).toInteger();
+        if (slot <= 0) {
+            return ipc::makeError(id, QStringLiteral("slot must be >= 1"));
+        }
+
+        bool pinnedGroup = false;
+        if (group == QStringLiteral("pinned")) {
+            pinnedGroup = true;
+        } else if (group == QStringLiteral("recent_non_pinned")) {
+            pinnedGroup = false;
+        } else {
+            return ipc::makeError(
+                id, QStringLiteral("group must be 'pinned' or 'recent_non_pinned'"));
+        }
+
+        const qint64 entryId = m_repo.resolveSlotEntry(pinnedGroup, slot, &error);
+        if (!error.isEmpty()) {
+            return ipc::makeError(id, error);
+        }
+        QCborMap payload;
+        payload.insert(QStringLiteral("entry_id"), entryId);
+        payload.insert(QStringLiteral("found"), entryId > 0);
+        return ipc::makeResponse(id, payload);
+    }
+
     if (method == "DeleteEntry") {
         const qint64 entryId = params.value("entry_id").toInteger();
         if (!m_repo.deleteEntry(entryId, &error)) {

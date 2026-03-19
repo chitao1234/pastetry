@@ -22,6 +22,8 @@ public:
     bool loadCapturePolicy(CapturePolicy *policy, QString *error) const;
     bool saveCapturePolicy(const CapturePolicy &policy, QString *error);
     bool setPinned(qint64 entryId, bool pinned, QString *error);
+    bool movePinnedEntry(qint64 entryId, int targetPinnedIndex, QString *error);
+    qint64 resolveSlotEntry(bool pinnedGroup, int slotOneBased, QString *error) const;
     bool deleteEntry(qint64 entryId, QString *error);
     bool clearHistory(bool keepPinned, QString *error);
 

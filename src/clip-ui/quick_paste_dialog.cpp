@@ -188,6 +188,27 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     auto *refreshShortcut = new QShortcut(QKeySequence(Qt::Key_F5), this);
     connect(refreshShortcut, &QShortcut::activated, this,
             &QuickPasteDialog::refreshResults);
+    auto *clearSearchShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
+    connect(clearSearchShortcut, &QShortcut::activated, this, [this] {
+        m_searchEdit->clear();
+        m_searchEdit->setFocus();
+    });
+    auto *inspectShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_I), this);
+    connect(inspectShortcut, &QShortcut::activated, this, [this] {
+        const qint64 entryId = selectedEntryId();
+        if (entryId > 0) {
+            inspectEntry(entryId);
+        }
+    });
+    auto *refreshShortcutSecondary =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_N), this);
+    connect(refreshShortcutSecondary, &QShortcut::activated, this,
+            &QuickPasteDialog::refreshResults);
+    auto *hideShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_W), this);
+    connect(hideShortcut, &QShortcut::activated, this, [this] { hide(); });
 
     auto *activateReturnShortcut =
         new QShortcut(QKeySequence(Qt::Key_Return), m_table);

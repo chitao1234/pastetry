@@ -21,7 +21,8 @@ public:
     explicit GlobalShortcutService(QObject *parent = nullptr, int windowsHotkeyId = 1);
     ~GlobalShortcutService() override;
 
-    ShortcutRegistrationState registerShortcut(const QKeySequence &sequence);
+    ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
+                                               bool requireModifier = true);
     void unregisterShortcut();
 
     QString lastError() const;
@@ -34,8 +35,10 @@ signals:
     void activated();
 
 private:
-    ShortcutRegistrationState registerWindowsShortcut(const QKeySequence &sequence);
-    ShortcutRegistrationState registerX11Shortcut(const QKeySequence &sequence);
+    ShortcutRegistrationState registerWindowsShortcut(const QKeySequence &sequence,
+                                                      bool requireModifier);
+    ShortcutRegistrationState registerX11Shortcut(const QKeySequence &sequence,
+                                                  bool requireModifier);
 
     void unregisterWindowsShortcut();
     void unregisterX11Shortcut();

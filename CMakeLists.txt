@@ -44,6 +44,7 @@ add_executable(pastetry-clip-ui
     src/clip-ui/main_window.cpp
     src/clip-ui/preview_text_delegate.cpp
     src/clip-ui/quick_paste_dialog.cpp
+    src/clip-ui/shortcut_config.cpp
     src/clip-ui/settings_dialog.cpp
 )
 
@@ -57,6 +58,10 @@ if(UNIX AND NOT APPLE)
     find_package(X11 REQUIRED)
     target_include_directories(pastetry-clip-ui PRIVATE ${X11_INCLUDE_DIR})
     target_link_libraries(pastetry-clip-ui PRIVATE ${X11_LIBRARIES})
+    if(X11_XTest_FOUND)
+        target_link_libraries(pastetry-clip-ui PRIVATE ${X11_XTest_LIB})
+        target_compile_definitions(pastetry-clip-ui PRIVATE PASTETRY_HAVE_XTEST=1)
+    endif()
 endif()
 
 enable_testing()

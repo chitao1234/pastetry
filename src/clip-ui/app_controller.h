@@ -3,6 +3,7 @@
 #include "clip-ui/global_shortcut_service.h"
 #include "clip-ui/main_window.h"
 #include "clip-ui/quick_paste_dialog.h"
+#include "clip-ui/shortcut_config.h"
 #include "common/app_paths.h"
 #include "common/ipc_client.h"
 
@@ -41,7 +42,16 @@ private:
     void setupTray();
     void loadSettings();
     void saveSettings();
-    void applyShortcutSettings();
+    void applyShortcutSettings(bool notifyFailures = true);
+    void clearShortcutRegistrations();
+    void clearChordCaptureRegistrations();
+    void beginChordCapture(const QString &firstKeyPortable);
+    void endChordCapture();
+    void handleShortcutAction(const QString &actionId);
+    void executeSlotShortcut(const ShortcutActionSpec &spec);
+    bool sendSyntheticPaste(QString *error) const;
+    void notifyShortcutWarning(const QString &title, const QString &message);
+
     void applyViewSettings();
     void checkDaemonConnectivity(bool notifyIfUnavailable);
     void notifyDaemonUnavailable(const QString &reason);
@@ -52,18 +62,28 @@ private:
                                const QVector<bool> &fallback) const;
     QString serializeColumns(const QVector<bool> &columns) const;
     QVector<bool> normalizedColumns(const QVector<bool> &columns) const;
+
     AppPaths m_paths;
     IpcClient m_client;
     MainWindow m_mainWindow;
     QuickPasteDialog m_quickPasteDialog;
-    GlobalShortcutService m_quickPasteShortcutService;
-    GlobalShortcutService m_openHistoryShortcutService;
-    GlobalShortcutService m_openInspectorShortcutService;
 
     QSettings m_settings;
-    QKeySequence m_quickPasteShortcut;
-    QKeySequence m_openHistoryShortcut;
-    QKeySequence m_openInspectorShortcut;
+    QHash<QString, ShortcutBindingConfig> m_shortcutBindings;
+    QHash<QString, ShortcutRegistrationState> m_shortcutStates;
+    QHash<QString, QString> m_shortcutErrors;
+    QKeySequence m_autoPasteKey = QKeySequence(Qt::CTRL | Qt::Key_V);
+
+    QVector<GlobalShortcutService *> m_baseShortcutServices;
+    QVector<GlobalShortcutService *> m_chordSecondShortcutServices;
+    QHash<GlobalShortcutService *, QString> m_serviceToDirectAction;
+    QHash<GlobalShortcutService *, QString> m_serviceToChordFirstKey;
+    QHash<GlobalShortcutService *, QString> m_serviceToChordSecondAction;
+    QHash<QString, QVector<QString>> m_chordFirstToActions;
+    QVector<QString> m_pendingChordActions;
+    bool m_chordCaptureActive = false;
+    int m_nextHotkeyId = 1;
+
     bool m_startToTray = true;
     QByteArray m_popupGeometry;
     QVector<bool> m_historyColumns = {true, true, true, true};
@@ -72,12 +92,6 @@ private:
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrictFullScan = false;
     CapturePolicy m_capturePolicy;
-    ShortcutRegistrationState m_quickPasteShortcutState =
-        ShortcutRegistrationState::Disabled;
-    ShortcutRegistrationState m_openHistoryShortcutState =
-        ShortcutRegistrationState::Disabled;
-    ShortcutRegistrationState m_openInspectorShortcutState =
-        ShortcutRegistrationState::Disabled;
 
     QSystemTrayIcon *m_trayIcon = nullptr;
     QAction *m_openHistoryAction = nullptr;
@@ -93,6 +107,7 @@ private:
     bool m_daemonStatusKnown = false;
     bool m_daemonReachable = false;
     QTimer m_daemonHealthTimer;
+    QTimer m_chordTimeoutTimer;
 };
 
 }  // namespace pastetry

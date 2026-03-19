@@ -7,6 +7,7 @@
 #include <QCborArray>
 #include <QCborMap>
 #include <QComboBox>
+#include <QDropEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -22,9 +23,44 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <functional>
 
 namespace pastetry {
 namespace {
+
+class PinnedReorderTableView : public QTableView {
+public:
+    explicit PinnedReorderTableView(QWidget *parent = nullptr) : QTableView(parent) {}
+
+    std::function<void(int fromRow, int toRow)> onPinnedReorderDrop;
+
+protected:
+    void dropEvent(QDropEvent *event) override {
+        if (!onPinnedReorderDrop) {
+            QTableView::dropEvent(event);
+            return;
+        }
+
+        const QModelIndexList selectedRows =
+            selectionModel() ? selectionModel()->selectedRows() : QModelIndexList{};
+        if (selectedRows.isEmpty()) {
+            event->ignore();
+            return;
+        }
+        const int fromRow = selectedRows.first().row();
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        int toRow = indexAt(event->position().toPoint()).row();
+#else
+        int toRow = indexAt(event->pos()).row();
+#endif
+        if (toRow < 0 && model()) {
+            toRow = model()->rowCount();
+        }
+        onPinnedReorderDrop(fromRow, toRow);
+        event->acceptProposedAction();
+    }
+};
 
 QVector<EntrySummary> parseSummaries(const QCborArray &items) {
     QVector<EntrySummary> entries;
@@ -136,7 +172,8 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     toolbar->addWidget(m_deleteButton);
     toolbar->addWidget(m_clearButton);
 
-    m_table = new QTableView(this);
+    auto *reorderTable = new PinnedReorderTableView(this);
+    m_table = reorderTable;
     m_model = new HistoryModel(this);
     m_previewDelegate = new PreviewTextDelegate(m_client, m_table);
     m_table->setModel(m_model);
@@ -159,6 +196,44 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
                                                       QHeaderView::ResizeToContents);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
+    reorderTable->setDragDropMode(QAbstractItemView::NoDragDrop);
+    reorderTable->setDragEnabled(false);
+    reorderTable->setAcceptDrops(false);
+    reorderTable->setDropIndicatorShown(false);
+    reorderTable->setDefaultDropAction(Qt::MoveAction);
+    reorderTable->onPinnedReorderDrop = [this](int fromRow, int toRow) {
+        if (!m_pinnedReorderEnabled || fromRow < 0 || fromRow >= m_model->rowCount()) {
+            return;
+        }
+        if (!m_model->pinnedAt(fromRow)) {
+            return;
+        }
+
+        int pinnedCount = 0;
+        while (pinnedCount < m_model->rowCount() && m_model->pinnedAt(pinnedCount)) {
+            ++pinnedCount;
+        }
+        if (pinnedCount <= 1) {
+            return;
+        }
+
+        int normalizedTargetRow = toRow;
+        if (normalizedTargetRow < 0 || normalizedTargetRow > pinnedCount) {
+            normalizedTargetRow = pinnedCount;
+        }
+        if (normalizedTargetRow >= pinnedCount) {
+            normalizedTargetRow = pinnedCount - 1;
+        }
+        if (normalizedTargetRow > fromRow) {
+            --normalizedTargetRow;
+        }
+        normalizedTargetRow = qBound(0, normalizedTargetRow, pinnedCount - 1);
+        if (normalizedTargetRow == fromRow) {
+            return;
+        }
+
+        movePinnedEntry(m_model->idAt(fromRow), normalizedTargetRow);
+    };
 
     layout->addLayout(toolbar);
     layout->addWidget(m_searchErrorLabel);
@@ -173,7 +248,10 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     m_newHighlightTimer->start();
 
     connect(m_searchEdit, &QLineEdit::textChanged, this,
-            [this] { m_searchTimer->start(); });
+            [this] {
+                m_searchTimer->start();
+                updatePinnedReorderEnabled();
+            });
     connect(m_searchTimer, &QTimer::timeout, this, [this] { loadInitial(); });
     connect(m_newHighlightTimer, &QTimer::timeout, this,
             [this] { m_table->viewport()->update(); });
@@ -201,6 +279,26 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     });
     auto *refreshShortcut = new QShortcut(QKeySequence(Qt::Key_F5), this);
     connect(refreshShortcut, &QShortcut::activated, this, [this] { loadInitial(); });
+    auto *clearSearchShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_L), this);
+    connect(clearSearchShortcut, &QShortcut::activated, this, [this] {
+        m_searchEdit->clear();
+        m_searchEdit->setFocus();
+    });
+    auto *inspectShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_I), this);
+    connect(inspectShortcut, &QShortcut::activated, this, [this] {
+        const qint64 entryId = selectedEntryId();
+        if (entryId > 0) {
+            inspectEntry(entryId);
+        }
+    });
+    auto *loadMoreShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_N), this);
+    connect(loadMoreShortcut, &QShortcut::activated, this, &MainWindow::loadMore);
+    auto *closeWindowShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_W), this);
+    connect(closeWindowShortcut, &QShortcut::activated, this, [this] { close(); });
 
     auto *activateReturnShortcut =
         new QShortcut(QKeySequence(Qt::Key_Return), m_table);
@@ -217,6 +315,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
 
     syncSearchModeCombo();
     applyTableLayout();
+    updatePinnedReorderEnabled();
     loadInitial();
 }
 
@@ -312,8 +411,45 @@ void MainWindow::refresh(bool resetCursor) {
 
     m_cursor = m_model->nextCursor();
     m_loadMoreButton->setEnabled(m_cursor >= 0);
+    updatePinnedReorderEnabled();
     statusBar()->showMessage(QStringLiteral("Loaded %1 entries").arg(m_model->rowCount()),
                              2000);
+}
+
+void MainWindow::movePinnedEntry(qint64 entryId, int targetPinnedIndex) {
+    if (entryId <= 0 || targetPinnedIndex < 0) {
+        return;
+    }
+
+    QString error;
+    QCborMap params;
+    params.insert(QStringLiteral("entry_id"), entryId);
+    params.insert(QStringLiteral("target_index"), targetPinnedIndex);
+    m_client.request(QStringLiteral("MovePinnedEntry"), params, 2500, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Pinned reorder failed"), error);
+        return;
+    }
+
+    refresh(true);
+}
+
+void MainWindow::updatePinnedReorderEnabled() {
+    const bool enabled = m_searchEdit && m_searchEdit->text().trimmed().isEmpty();
+    if (m_pinnedReorderEnabled == enabled) {
+        return;
+    }
+    m_pinnedReorderEnabled = enabled;
+
+    auto *reorderTable = dynamic_cast<PinnedReorderTableView *>(m_table);
+    if (!reorderTable) {
+        return;
+    }
+    reorderTable->setDragDropMode(enabled ? QAbstractItemView::DragDrop
+                                          : QAbstractItemView::NoDragDrop);
+    reorderTable->setDragEnabled(enabled);
+    reorderTable->setAcceptDrops(enabled);
+    reorderTable->setDropIndicatorShown(enabled);
 }
 
 void MainWindow::applyTableLayout() {

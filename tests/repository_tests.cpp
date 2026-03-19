@@ -16,6 +16,8 @@ private slots:
     void advancedSearchFiltersAndErrors();
     void preservesFormatInsertionOrder();
     void persistsCapturePolicy();
+    void pinnedOrderMoveAndRepin();
+    void resolvesRecentNonPinnedSlots();
 };
 
 void RepositoryTests::insertAndReadBack() {
@@ -304,6 +306,112 @@ void RepositoryTests::persistsCapturePolicy() {
     QCOMPARE(loaded.customAllowlistPatterns.at(1), QString("image/*"));
     QCOMPARE(loaded.maxFormatBytes, 5 * 1024 * 1024);
     QCOMPARE(loaded.maxEntryBytes, 25 * 1024 * 1024);
+}
+
+void RepositoryTests::pinnedOrderMoveAndRepin() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-pin-order");
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry one;
+    one.sourceApp = QStringLiteral("pin-order");
+    one.preview = QStringLiteral("one");
+    one.formats = {CapturedFormat{"text/plain", QByteArray("one")}};
+    const qint64 id1 = repo.insertEntry(one, &error);
+    QVERIFY2(id1 > 0, qPrintable(error));
+
+    CapturedEntry two;
+    two.sourceApp = QStringLiteral("pin-order");
+    two.preview = QStringLiteral("two");
+    two.formats = {CapturedFormat{"text/plain", QByteArray("two")}};
+    const qint64 id2 = repo.insertEntry(two, &error);
+    QVERIFY2(id2 > 0, qPrintable(error));
+
+    CapturedEntry three;
+    three.sourceApp = QStringLiteral("pin-order");
+    three.preview = QStringLiteral("three");
+    three.formats = {CapturedFormat{"text/plain", QByteArray("three")}};
+    const qint64 id3 = repo.insertEntry(three, &error);
+    QVERIFY2(id3 > 0, qPrintable(error));
+
+    QVERIFY2(repo.setPinned(id1, true, &error), qPrintable(error));
+    QVERIFY2(repo.setPinned(id2, true, &error), qPrintable(error));
+    QVERIFY2(repo.setPinned(id3, true, &error), qPrintable(error));
+
+    QCOMPARE(repo.resolveSlotEntry(true, 1, &error), id3);
+    QCOMPARE(repo.resolveSlotEntry(true, 2, &error), id2);
+    QCOMPARE(repo.resolveSlotEntry(true, 3, &error), id1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QVERIFY2(repo.movePinnedEntry(id1, 0, &error), qPrintable(error));
+    QCOMPARE(repo.resolveSlotEntry(true, 1, &error), id1);
+    QCOMPARE(repo.resolveSlotEntry(true, 2, &error), id3);
+    QCOMPARE(repo.resolveSlotEntry(true, 3, &error), id2);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QVERIFY2(repo.setPinned(id3, false, &error), qPrintable(error));
+    QCOMPARE(repo.resolveSlotEntry(true, 1, &error), id1);
+    QCOMPARE(repo.resolveSlotEntry(true, 2, &error), id2);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QVERIFY2(repo.setPinned(id3, true, &error), qPrintable(error));
+    QCOMPARE(repo.resolveSlotEntry(true, 1, &error), id3);
+    QCOMPARE(repo.resolveSlotEntry(true, 2, &error), id1);
+    QCOMPARE(repo.resolveSlotEntry(true, 3, &error), id2);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+}
+
+void RepositoryTests::resolvesRecentNonPinnedSlots() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-recent-slots");
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry npA;
+    npA.sourceApp = QStringLiteral("slots");
+    npA.preview = QStringLiteral("np-a");
+    npA.formats = {CapturedFormat{"text/plain", QByteArray("np-a")}};
+    const qint64 nonPinnedA = repo.insertEntry(npA, &error);
+    QVERIFY2(nonPinnedA > 0, qPrintable(error));
+
+    CapturedEntry pB;
+    pB.sourceApp = QStringLiteral("slots");
+    pB.preview = QStringLiteral("p-b");
+    pB.formats = {CapturedFormat{"text/plain", QByteArray("p-b")}};
+    const qint64 pinnedB = repo.insertEntry(pB, &error);
+    QVERIFY2(pinnedB > 0, qPrintable(error));
+    QVERIFY2(repo.setPinned(pinnedB, true, &error), qPrintable(error));
+
+    CapturedEntry npC;
+    npC.sourceApp = QStringLiteral("slots");
+    npC.preview = QStringLiteral("np-c");
+    npC.formats = {CapturedFormat{"text/plain", QByteArray("np-c")}};
+    const qint64 nonPinnedC = repo.insertEntry(npC, &error);
+    QVERIFY2(nonPinnedC > 0, qPrintable(error));
+
+    CapturedEntry npD;
+    npD.sourceApp = QStringLiteral("slots");
+    npD.preview = QStringLiteral("np-d");
+    npD.formats = {CapturedFormat{"text/plain", QByteArray("np-d")}};
+    const qint64 nonPinnedD = repo.insertEntry(npD, &error);
+    QVERIFY2(nonPinnedD > 0, qPrintable(error));
+
+    QCOMPARE(repo.resolveSlotEntry(false, 1, &error), nonPinnedD);
+    QCOMPARE(repo.resolveSlotEntry(false, 2, &error), nonPinnedC);
+    QCOMPARE(repo.resolveSlotEntry(false, 3, &error), nonPinnedA);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+
+    QCOMPARE(repo.resolveSlotEntry(false, 4, &error), -1);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
 }
 
 QTEST_APPLESS_MAIN(RepositoryTests)

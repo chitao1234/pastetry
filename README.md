@@ -20,11 +20,21 @@ Cross-platform clipboard manager prototype with a daemon + Qt Widgets UI.
   - Tray icon + tray menu (`Open History`, `Open Quick Paste`, `Settings`, `Quit`)
   - Single-instance behavior (second launch toggles quick-paste popup in existing instance)
   - Start-minimized-to-tray lifecycle
-  - Configurable global shortcut for quick-paste popup (disabled by default)
+  - Configurable global shortcuts with per-action mode:
+    - `Disabled`
+    - `Direct` (single global key sequence)
+    - `Chord` (two-step global sequence)
+  - Global slot actions for:
+    - Copy recent non-pinned item `#1..#9`
+    - Paste recent non-pinned item `#1..#9`
+    - Copy pinned item `#1..#9`
+    - Paste pinned item `#1..#9`
+  - Auto-paste key configuration (default `Ctrl+V`) for paste-style slot actions
   - Quick-paste popup (keyboard-first search + Enter to activate)
   - Quick-paste auto-hide when window loses focus
   - Configurable visible columns for History and Quick Paste tables
   - Configurable preview line count with uniform row heights
+  - Manual pinned ordering with drag/drop in History (when search is empty)
   - Settings dialog supports `Apply` without closing
   - Search
   - Paginated list view
@@ -67,14 +77,26 @@ Optional arguments for both binaries:
 - `--socket <name>`
 - If UI cannot reach daemon, it warns and keeps retrying connectivity in the background.
 
-### Quick-paste shortcut
+### Global shortcuts
 
 - Configure from tray menu: `Settings`.
-- Default is disabled (no global shortcut).
+- Existing actions and slot actions are configurable independently.
+- Each action can be `Disabled`, `Direct`, or `Chord`.
+- Chord mode supports a global step-1 key followed by a global step-2 key.
+- Defaults are conservative:
+  - Existing top-level actions keep prior behavior.
+  - Slot actions are disabled by default.
 - Current backend targets:
   - Windows: global shortcut supported.
   - Linux X11 (`xcb` session): global shortcut supported.
   - Linux Wayland: global shortcut registration is unavailable; tray actions still work.
+
+### Slot actions
+
+- Recent slots (`recent #1..#9`) resolve from newest non-pinned entries only.
+- Pinned slots (`pinned #1..#9`) resolve from manual pinned order.
+- Paste slot actions activate entry + send synthetic paste key sequence.
+- If slot item is missing, UI shows a warning notification.
 
 ### Display preferences
 
@@ -93,6 +115,7 @@ Optional arguments for both binaries:
 ## Notes
 
 - This implementation is C++20 + Qt Widgets only.
+- On Linux X11, auto-paste simulation for slot actions requires XTest support at build time.
 - Hashing currently uses SHA-256 for blob identity/dedup.
 - Clipboard source app/window metadata is stored as `unknown`/empty in this prototype.
 - Logging:

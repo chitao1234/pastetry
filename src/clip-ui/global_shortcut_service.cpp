@@ -344,7 +344,7 @@ GlobalShortcutService::~GlobalShortcutService() {
 }
 
 ShortcutRegistrationState GlobalShortcutService::registerShortcut(
-    const QKeySequence &sequence) {
+    const QKeySequence &sequence, bool requireModifier) {
     m_lastError.clear();
     unregisterShortcut();
 
@@ -353,9 +353,9 @@ ShortcutRegistrationState GlobalShortcutService::registerShortcut(
     }
 
 #ifdef Q_OS_WIN
-    return registerWindowsShortcut(sequence);
+    return registerWindowsShortcut(sequence, requireModifier);
 #elif defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
-    return registerX11Shortcut(sequence);
+    return registerX11Shortcut(sequence, requireModifier);
 #else
     m_lastError = QStringLiteral("Global shortcuts are unsupported on this platform");
     return ShortcutRegistrationState::Unavailable;
@@ -437,7 +437,7 @@ bool GlobalShortcutService::nativeEventFilter(const QByteArray &eventType, void 
 }
 
 ShortcutRegistrationState GlobalShortcutService::registerWindowsShortcut(
-    const QKeySequence &sequence) {
+    const QKeySequence &sequence, bool requireModifier) {
 #ifdef Q_OS_WIN
     const int keySpec = keyFromSequence(sequence);
     if (keySpec == 0) {
@@ -456,7 +456,7 @@ ShortcutRegistrationState GlobalShortcutService::registerWindowsShortcut(
     }
 
     const UINT nativeMods = qtModsToWindows(mods);
-    if (nativeMods == 0) {
+    if (requireModifier && nativeMods == 0) {
         m_lastError = QStringLiteral("Shortcut requires at least one modifier");
         return ShortcutRegistrationState::InvalidBinding;
     }
@@ -477,13 +477,14 @@ ShortcutRegistrationState GlobalShortcutService::registerWindowsShortcut(
     return ShortcutRegistrationState::Registered;
 #else
     Q_UNUSED(sequence);
+    Q_UNUSED(requireModifier);
     m_lastError = QStringLiteral("Windows shortcut backend unavailable");
     return ShortcutRegistrationState::Unavailable;
 #endif
 }
 
 ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
-    const QKeySequence &sequence) {
+    const QKeySequence &sequence, bool requireModifier) {
 #if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
     if (!QGuiApplication::platformName().contains(QStringLiteral("xcb"))) {
         m_lastError = QStringLiteral("Global shortcut unavailable outside X11 session");
@@ -522,7 +523,7 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
     }
 
     const unsigned int nativeMods = qtModsToX11(mods);
-    if (nativeMods == 0) {
+    if (requireModifier && nativeMods == 0) {
         m_lastError = QStringLiteral("Shortcut requires at least one modifier");
         return ShortcutRegistrationState::InvalidBinding;
     }
@@ -568,6 +569,7 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
     return ShortcutRegistrationState::Registered;
 #else
     Q_UNUSED(sequence);
+    Q_UNUSED(requireModifier);
     m_lastError = QStringLiteral("X11 shortcut backend unavailable");
     return ShortcutRegistrationState::Unavailable;
 #endif

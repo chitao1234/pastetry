@@ -1,8 +1,10 @@
 #pragma once
 
+#include "clip-ui/shortcut_config.h"
 #include "common/models.h"
 
 #include <QDialog>
+#include <QHash>
 #include <QKeySequence>
 #include <QVector>
 
@@ -22,24 +24,21 @@ class SettingsDialog : public QDialog {
 public:
     explicit SettingsDialog(QWidget *parent = nullptr);
 
-    void setValues(const QKeySequence &quickPasteShortcut,
-                   const QKeySequence &openHistoryShortcut,
-                   const QKeySequence &openInspectorShortcut,
+    void setValues(const QHash<QString, ShortcutBindingConfig> &shortcutBindings,
+                   const QHash<QString, QString> &shortcutStatusTextByAction,
+                   const QKeySequence &autoPasteKey,
                    bool startToTray,
-                   const QString &quickPasteShortcutStatusText,
-                   const QString &openHistoryShortcutStatusText,
-                   const QString &openInspectorShortcutStatusText,
+                   bool hasShortcutConflict,
+                   const QString &shortcutConflictMessage,
                    const QVector<bool> &historyColumns,
                    const QVector<bool> &quickPasteColumns, int previewLineCount,
                    bool regexStrictFullScan,
                    const CapturePolicy &capturePolicy);
-    void setShortcutStatusTexts(const QString &quickPasteShortcutStatusText,
-                                const QString &openHistoryShortcutStatusText,
-                                const QString &openInspectorShortcutStatusText);
+    void setShortcutStatusTexts(
+        const QHash<QString, QString> &shortcutStatusTextByAction);
     void setShortcutConflictState(bool hasConflict, const QString &message);
-    QKeySequence quickPasteShortcut() const;
-    QKeySequence openHistoryShortcut() const;
-    QKeySequence openInspectorShortcut() const;
+    QHash<QString, ShortcutBindingConfig> shortcutBindings() const;
+    QKeySequence autoPasteKey() const;
     bool startToTray() const;
     QVector<bool> historyColumns() const;
     QVector<bool> quickPasteColumns() const;
@@ -52,14 +51,26 @@ signals:
     void shortcutsEdited();
 
 private:
+    struct ShortcutRowWidgets {
+        QComboBox *mode = nullptr;
+        QKeySequenceEdit *directEdit = nullptr;
+        QKeySequenceEdit *chordFirstEdit = nullptr;
+        QKeySequenceEdit *chordSecondEdit = nullptr;
+        QLabel *statusLabel = nullptr;
+    };
+
+    ShortcutBindingConfig bindingForAction(const QString &actionId) const;
+    void setBindingForAction(const QString &actionId,
+                             const ShortcutBindingConfig &binding);
+    void refreshShortcutRowState(const QString &actionId);
     QVector<bool> columnsFromChecks(const QVector<QCheckBox *> &checks) const;
     bool hasUnsavedChanges() const;
     void refreshApplyButtonState();
-    QVector<QKeySequence> globalShortcuts() const;
-    static constexpr int kShortcutActionCount = 3;
-    QVector<QKeySequenceEdit *> m_shortcutEdits;
-    QVector<QLabel *> m_shortcutStatusLabels;
+    QHash<QString, ShortcutBindingConfig> allShortcutBindings() const;
+
+    QHash<QString, ShortcutRowWidgets> m_shortcutRows;
     QLabel *m_shortcutConflictLabel = nullptr;
+    QKeySequenceEdit *m_autoPasteKeyEdit = nullptr;
     QCheckBox *m_startToTray = nullptr;
     QSpinBox *m_previewLines = nullptr;
     QCheckBox *m_regexStrictFullScan = nullptr;
@@ -72,7 +83,8 @@ private:
     QVector<QCheckBox *> m_historyColumnChecks;
     QVector<QCheckBox *> m_quickPasteColumnChecks;
 
-    QVector<QKeySequence> m_savedShortcuts;
+    QHash<QString, ShortcutBindingConfig> m_savedShortcutBindings;
+    QKeySequence m_savedAutoPasteKey;
     bool m_savedStartToTray = true;
     QVector<bool> m_savedHistoryColumns;
     QVector<bool> m_savedQuickPasteColumns;

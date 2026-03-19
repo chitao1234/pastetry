@@ -52,6 +52,8 @@ private:
 
     void refresh(bool resetCursor);
     qint64 selectedEntryId() const;
+    void movePinnedEntry(qint64 entryId, int targetPinnedIndex);
+    void updatePinnedReorderEnabled();
     void applyTableLayout();
     void showHeaderContextMenu(const QPoint &position);
     void showEntryContextMenu(const QPoint &position);
@@ -76,6 +78,7 @@ private:
     ClipboardInspectorDialog *m_clipboardInspectorDialog = nullptr;
     int m_cursor = 0;
     bool m_closeToTrayEnabled = true;
+    bool m_pinnedReorderEnabled = false;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;

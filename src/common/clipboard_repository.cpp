@@ -1,5 +1,6 @@
 #include "common/clipboard_repository.h"
 
+#include <algorithm>
 #include <QDateTime>
 #include <QRegularExpression>
 #include <QSqlError>
@@ -19,6 +20,11 @@ const QString kSummaryColumns = QStringLiteral(
     "(SELECT ef2.blob_hash FROM entry_formats ef2 "
     "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
     "AS image_blob_hash ");
+
+const QString kPinnedThenRecencyOrder = QStringLiteral(
+    "e.pinned DESC, "
+    "CASE WHEN e.pinned = 1 THEN e.pin_order ELSE 2147483647 END ASC, "
+    "e.created_at_ms DESC");
 
 enum class QueryTokenType {
     Word,
@@ -231,6 +237,22 @@ QVector<EntrySummary> loadSummariesByIds(const QSqlDatabase &db, const QVector<q
         }
     }
     return summaries;
+}
+
+QVector<qint64> loadPinnedIdsOrdered(const QSqlDatabase &db, QString *error) {
+    QVector<qint64> ids;
+    QSqlQuery query(db);
+    if (!query.exec(QStringLiteral(
+            "SELECT id FROM entries WHERE pinned = 1 ORDER BY pin_order ASC, created_at_ms DESC, id DESC"))) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return {};
+    }
+    while (query.next()) {
+        ids.push_back(query.value(0).toLongLong());
+    }
+    return ids;
 }
 
 bool tokenizeAdvancedQuery(const QString &queryText, QVector<QueryToken> *tokens,
@@ -609,9 +631,9 @@ SearchResult runRegexSearch(const QSqlDatabase &db, const SearchRequest &request
         return runPagedSummaryQuery(
             db,
             QStringLiteral("SELECT %1 FROM entries e "
-                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "ORDER BY %2 "
                            "LIMIT ? OFFSET ?")
-                .arg(kSummaryColumns),
+                .arg(kSummaryColumns, kPinnedThenRecencyOrder),
             {}, safeCursor, safeLimit, error);
     }
 
@@ -647,8 +669,9 @@ SearchResult runRegexSearch(const QSqlDatabase &db, const SearchRequest &request
         scan.prepare(
             QStringLiteral("SELECT e.id, e.preview "
                            "FROM entries e "
-                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
-                           "LIMIT ? OFFSET ?"));
+                           "ORDER BY %1 "
+                           "LIMIT ? OFFSET ?")
+                .arg(kPinnedThenRecencyOrder));
         scan.addBindValue(rowsToRead);
         scan.addBindValue(rowOffset);
 
@@ -701,9 +724,9 @@ SearchResult runPlainSearch(const QSqlDatabase &db, const SearchRequest &request
         return runPagedSummaryQuery(
             db,
             QStringLiteral("SELECT %1 FROM entries e "
-                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "ORDER BY %2 "
                            "LIMIT ? OFFSET ?")
-                .arg(kSummaryColumns),
+                .arg(kSummaryColumns, kPinnedThenRecencyOrder),
             {}, safeCursor, safeLimit, error);
     }
 
@@ -721,7 +744,9 @@ SearchResult runPlainSearch(const QSqlDatabase &db, const SearchRequest &request
                        "FROM entries_fts f "
                        "JOIN entries e ON e.id = f.rowid "
                        "WHERE entries_fts MATCH ? "
-                       "ORDER BY e.pinned DESC, bm25(entries_fts), e.created_at_ms DESC "
+                       "ORDER BY e.pinned DESC, "
+                       "CASE WHEN e.pinned = 1 THEN e.pin_order ELSE 2147483647 END ASC, "
+                       "bm25(entries_fts), e.created_at_ms DESC "
                        "LIMIT ? OFFSET ?")
             .arg(kSummaryColumns),
         {ftsQuery}, safeCursor, safeLimit, error);
@@ -734,9 +759,9 @@ SearchResult runAdvancedSearch(const QSqlDatabase &db, const SearchRequest &requ
         return runPagedSummaryQuery(
             db,
             QStringLiteral("SELECT %1 FROM entries e "
-                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "ORDER BY %2 "
                            "LIMIT ? OFFSET ?")
-                .arg(kSummaryColumns),
+                .arg(kSummaryColumns, kPinnedThenRecencyOrder),
             {}, safeCursor, safeLimit, error);
     }
 
@@ -762,9 +787,9 @@ SearchResult runAdvancedSearch(const QSqlDatabase &db, const SearchRequest &requ
         QStringLiteral("SELECT %1 "
                        "FROM entries e "
                        "WHERE %2 "
-                       "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                       "ORDER BY %3 "
                        "LIMIT ? OFFSET ?")
-            .arg(kSummaryColumns, expr.sql),
+            .arg(kSummaryColumns, expr.sql, kPinnedThenRecencyOrder),
         expr.bindValues, safeCursor, safeLimit, error);
 }
 
@@ -819,7 +844,8 @@ bool ClipboardRepository::initialize(QString *error) {
         "source_app TEXT NOT NULL DEFAULT '',"
         "source_window TEXT NOT NULL DEFAULT '',"
         "preview TEXT NOT NULL DEFAULT '',"
-        "pinned INTEGER NOT NULL DEFAULT 0"
+        "pinned INTEGER NOT NULL DEFAULT 0,"
+        "pin_order INTEGER NOT NULL DEFAULT 0"
         ")",
         "CREATE TABLE IF NOT EXISTS entry_formats ("
         "entry_id INTEGER NOT NULL,"
@@ -841,6 +867,7 @@ bool ClipboardRepository::initialize(QString *error) {
         "max_format_bytes, max_entry_bytes) "
         "VALUES (1, 'balanced', '', 10485760, 33554432)",
         "CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at_ms DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_entries_pinned_order ON entries(pinned, pin_order ASC)",
         "CREATE INDEX IF NOT EXISTS idx_entry_formats_entry ON entry_formats(entry_id)",
         "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(preview, source_app)",
         "CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN "
@@ -890,6 +917,74 @@ bool ClipboardRepository::initialize(QString *error) {
             }
             return false;
         }
+    }
+
+    QSqlQuery entriesInfo(m_db);
+    if (!entriesInfo.exec("PRAGMA table_info(entries)")) {
+        if (error) {
+            *error = entriesInfo.lastError().text();
+        }
+        return false;
+    }
+    bool hasPinOrder = false;
+    while (entriesInfo.next()) {
+        if (entriesInfo.value(1).toString() == QStringLiteral("pin_order")) {
+            hasPinOrder = true;
+            break;
+        }
+    }
+    if (!hasPinOrder) {
+        QSqlQuery alter(m_db);
+        if (!alter.exec(
+                "ALTER TABLE entries ADD COLUMN pin_order INTEGER NOT NULL DEFAULT 0")) {
+            if (error) {
+                *error = alter.lastError().text();
+            }
+            return false;
+        }
+    }
+
+    QVector<qint64> pinnedIds = loadPinnedIdsOrdered(m_db, error);
+    if (error && !error->isEmpty()) {
+        return false;
+    }
+
+    if (!m_db.transaction()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
+    }
+
+    QSqlQuery clearUnpinned(m_db);
+    if (!clearUnpinned.exec(QStringLiteral(
+            "UPDATE entries SET pin_order = 0 WHERE pinned = 0 AND pin_order != 0"))) {
+        m_db.rollback();
+        if (error) {
+            *error = clearUnpinned.lastError().text();
+        }
+        return false;
+    }
+
+    QSqlQuery assignOrder(m_db);
+    assignOrder.prepare("UPDATE entries SET pin_order = ? WHERE id = ?");
+    for (int i = 0; i < pinnedIds.size(); ++i) {
+        assignOrder.bindValue(0, i + 1);
+        assignOrder.bindValue(1, pinnedIds.at(i));
+        if (!assignOrder.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = assignOrder.lastError().text();
+            }
+            return false;
+        }
+    }
+
+    if (!m_db.commit()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
     }
 
     return m_blobStore.ensureTables(m_db, error);
@@ -1114,17 +1209,184 @@ bool ClipboardRepository::saveCapturePolicy(const CapturePolicy &policy, QString
 }
 
 bool ClipboardRepository::setPinned(qint64 entryId, bool pinned, QString *error) {
+    QSqlQuery stateQuery(m_db);
+    stateQuery.prepare("SELECT pinned, pin_order FROM entries WHERE id = ?");
+    stateQuery.addBindValue(entryId);
+    if (!stateQuery.exec()) {
+        if (error) {
+            *error = stateQuery.lastError().text();
+        }
+        return false;
+    }
+    if (!stateQuery.next()) {
+        if (error) {
+            *error = QStringLiteral("Entry not found");
+        }
+        return false;
+    }
+
+    const bool currentlyPinned = stateQuery.value(0).toInt() == 1;
+    const int currentOrder = stateQuery.value(1).toInt();
+
+    if (!m_db.transaction()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
+    }
+
+    if (pinned) {
+        QSqlQuery shift(m_db);
+        shift.prepare("UPDATE entries SET pin_order = pin_order + 1 WHERE pinned = 1 AND id != ?");
+        shift.addBindValue(entryId);
+        if (!shift.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = shift.lastError().text();
+            }
+            return false;
+        }
+
+        QSqlQuery pinQuery(m_db);
+        pinQuery.prepare("UPDATE entries SET pinned = 1, pin_order = 1 WHERE id = ?");
+        pinQuery.addBindValue(entryId);
+        if (!pinQuery.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = pinQuery.lastError().text();
+            }
+            return false;
+        }
+    } else {
+        QSqlQuery unpinQuery(m_db);
+        unpinQuery.prepare("UPDATE entries SET pinned = 0, pin_order = 0 WHERE id = ?");
+        unpinQuery.addBindValue(entryId);
+        if (!unpinQuery.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = unpinQuery.lastError().text();
+            }
+            return false;
+        }
+
+        if (currentlyPinned && currentOrder > 0) {
+            QSqlQuery compact(m_db);
+            compact.prepare(
+                "UPDATE entries SET pin_order = pin_order - 1 "
+                "WHERE pinned = 1 AND pin_order > ?");
+            compact.addBindValue(currentOrder);
+            if (!compact.exec()) {
+                m_db.rollback();
+                if (error) {
+                    *error = compact.lastError().text();
+                }
+                return false;
+            }
+        }
+    }
+
+    if (!m_db.commit()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool ClipboardRepository::movePinnedEntry(qint64 entryId, int targetPinnedIndex, QString *error) {
+    QVector<qint64> pinnedIds = loadPinnedIdsOrdered(m_db, error);
+    if (error && !error->isEmpty()) {
+        return false;
+    }
+    if (pinnedIds.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("No pinned entries");
+        }
+        return false;
+    }
+
+    const int currentIndex = pinnedIds.indexOf(entryId);
+    if (currentIndex < 0) {
+        if (error) {
+            *error = QStringLiteral("Entry is not pinned");
+        }
+        return false;
+    }
+
+    const int clampedTarget = qBound(0, targetPinnedIndex, pinnedIds.size() - 1);
+    if (clampedTarget == currentIndex) {
+        return true;
+    }
+
+    const qint64 movingId = pinnedIds.takeAt(currentIndex);
+    pinnedIds.insert(clampedTarget, movingId);
+
+    if (!m_db.transaction()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
+    }
+
+    QSqlQuery update(m_db);
+    update.prepare("UPDATE entries SET pin_order = ? WHERE id = ?");
+    for (int i = 0; i < pinnedIds.size(); ++i) {
+        update.bindValue(0, i + 1);
+        update.bindValue(1, pinnedIds.at(i));
+        if (!update.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = update.lastError().text();
+            }
+            return false;
+        }
+    }
+
+    if (!m_db.commit()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
+    }
+    return true;
+}
+
+qint64 ClipboardRepository::resolveSlotEntry(bool pinnedGroup, int slotOneBased,
+                                             QString *error) const {
+    if (slotOneBased <= 0) {
+        if (error) {
+            *error = QStringLiteral("slot must be >= 1");
+        }
+        return -1;
+    }
+
     QSqlQuery query(m_db);
-    query.prepare("UPDATE entries SET pinned = ? WHERE id = ?");
-    query.addBindValue(pinned ? 1 : 0);
-    query.addBindValue(entryId);
+    if (pinnedGroup) {
+        query.prepare(
+            "SELECT id FROM entries "
+            "WHERE pinned = 1 "
+            "ORDER BY pin_order ASC, created_at_ms DESC, id DESC "
+            "LIMIT 1 OFFSET ?");
+    } else {
+        query.prepare(
+            "SELECT id FROM entries "
+            "WHERE pinned = 0 "
+            "ORDER BY created_at_ms DESC, id DESC "
+            "LIMIT 1 OFFSET ?");
+    }
+    query.addBindValue(slotOneBased - 1);
     if (!query.exec()) {
         if (error) {
             *error = query.lastError().text();
         }
-        return false;
+        return -1;
     }
-    return query.numRowsAffected() > 0;
+    if (!query.next()) {
+        return -1;
+    }
+    return query.value(0).toLongLong();
 }
 
 bool ClipboardRepository::cleanupEntryBlobs(qint64 entryId, QString *error) {
@@ -1153,6 +1415,22 @@ bool ClipboardRepository::cleanupEntryBlobs(qint64 entryId, QString *error) {
 }
 
 bool ClipboardRepository::deleteEntry(qint64 entryId, QString *error) {
+    bool wasPinned = false;
+    int removedPinOrder = 0;
+    QSqlQuery beforeDelete(m_db);
+    beforeDelete.prepare("SELECT pinned, pin_order FROM entries WHERE id = ?");
+    beforeDelete.addBindValue(entryId);
+    if (!beforeDelete.exec()) {
+        if (error) {
+            *error = beforeDelete.lastError().text();
+        }
+        return false;
+    }
+    if (beforeDelete.next()) {
+        wasPinned = beforeDelete.value(0).toInt() == 1;
+        removedPinOrder = beforeDelete.value(1).toInt();
+    }
+
     if (!m_db.transaction()) {
         if (error) {
             *error = m_db.lastError().text();
@@ -1174,6 +1452,21 @@ bool ClipboardRepository::deleteEntry(qint64 entryId, QString *error) {
             *error = del.lastError().text();
         }
         return false;
+    }
+
+    if (wasPinned && removedPinOrder > 0) {
+        QSqlQuery compact(m_db);
+        compact.prepare(
+            "UPDATE entries SET pin_order = pin_order - 1 "
+            "WHERE pinned = 1 AND pin_order > ?");
+        compact.addBindValue(removedPinOrder);
+        if (!compact.exec()) {
+            m_db.rollback();
+            if (error) {
+                *error = compact.lastError().text();
+            }
+            return false;
+        }
     }
 
     if (!m_db.commit()) {
