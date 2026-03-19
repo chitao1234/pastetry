@@ -13,7 +13,10 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSizePolicy>
+#include <QSpacerItem>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 namespace pastetry {
@@ -62,12 +65,17 @@ CaptureProfile captureProfileFromComboIndex(int index) {
 
 SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Settings"));
-    resize(560, 360);
+    resize(640, 430);
 
     auto *mainLayout = new QVBoxLayout(this);
-    auto *form = new QFormLayout();
+    auto *tabs = new QTabWidget(this);
+    mainLayout->addWidget(tabs, 1);
 
-    auto *shortcutRow = new QWidget(this);
+    auto *generalTab = new QWidget(tabs);
+    auto *generalForm = new QFormLayout(generalTab);
+    generalForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    auto *shortcutRow = new QWidget(generalTab);
     auto *shortcutLayout = new QHBoxLayout(shortcutRow);
     shortcutLayout->setContentsMargins(0, 0, 0, 0);
 
@@ -78,12 +86,23 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     shortcutLayout->addWidget(m_shortcutEdit, 1);
     shortcutLayout->addWidget(clearButton);
 
-    m_shortcutStatus = new QLabel(this);
+    m_shortcutStatus = new QLabel(generalTab);
     m_shortcutStatus->setWordWrap(true);
 
-    m_startToTray = new QCheckBox(QStringLiteral("Start minimized to tray"), this);
+    m_startToTray = new QCheckBox(QStringLiteral("Start minimized to tray"), generalTab);
 
-    auto *columnsWidget = new QWidget(this);
+    generalForm->addRow(QStringLiteral("Global shortcut"), shortcutRow);
+    generalForm->addRow(QStringLiteral("Shortcut status"), m_shortcutStatus);
+    generalForm->addRow(QString(), m_startToTray);
+    generalForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
+                                         QSizePolicy::Expanding));
+    tabs->addTab(generalTab, QStringLiteral("General"));
+
+    auto *viewsTab = new QWidget(tabs);
+    auto *viewsForm = new QFormLayout(viewsTab);
+    viewsForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    auto *columnsWidget = new QWidget(viewsTab);
     auto *columnsLayout = new QGridLayout(columnsWidget);
     columnsLayout->setContentsMargins(0, 0, 0, 0);
     columnsLayout->setColumnStretch(0, 1);
@@ -115,13 +134,24 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     columnsLayout->addWidget(historyContainer, 1, 0);
     columnsLayout->addWidget(quickContainer, 1, 1);
 
-    m_previewLines = new QSpinBox(this);
+    m_previewLines = new QSpinBox(viewsTab);
     m_previewLines->setMinimum(1);
     m_previewLines->setMaximum(12);
     m_regexStrictFullScan =
-        new QCheckBox(QStringLiteral("Regex strict mode scans full history"), this);
+        new QCheckBox(QStringLiteral("Regex strict mode scans full history"), viewsTab);
 
-    auto *capturePolicyWidget = new QWidget(this);
+    viewsForm->addRow(QStringLiteral("Visible columns"), columnsWidget);
+    viewsForm->addRow(QStringLiteral("Preview lines"), m_previewLines);
+    viewsForm->addRow(QStringLiteral("Search"), m_regexStrictFullScan);
+    viewsForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
+                                       QSizePolicy::Expanding));
+    tabs->addTab(viewsTab, QStringLiteral("Views"));
+
+    auto *richFormatTab = new QWidget(tabs);
+    auto *richFormatForm = new QFormLayout(richFormatTab);
+    richFormatForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    auto *capturePolicyWidget = new QWidget(richFormatTab);
     auto *capturePolicyLayout = new QGridLayout(capturePolicyWidget);
     capturePolicyLayout->setContentsMargins(0, 0, 0, 0);
 
@@ -164,19 +194,14 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     capturePolicyLayout->addWidget(customLabel, 3, 0, Qt::AlignTop);
     capturePolicyLayout->addWidget(m_customAllowlist, 3, 1);
 
-    form->addRow(QStringLiteral("Global shortcut"), shortcutRow);
-    form->addRow(QStringLiteral("Shortcut status"), m_shortcutStatus);
-    form->addRow(QStringLiteral("Visible columns"), columnsWidget);
-    form->addRow(QStringLiteral("Preview lines"), m_previewLines);
-    form->addRow(QStringLiteral("Search"), m_regexStrictFullScan);
-    form->addRow(QStringLiteral("Rich format capture"), capturePolicyWidget);
-    form->addRow(QString(), m_startToTray);
+    richFormatForm->addRow(QStringLiteral("Rich format capture"), capturePolicyWidget);
+    richFormatForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
+                                            QSizePolicy::Expanding));
+    tabs->addTab(richFormatTab, QStringLiteral("Rich Formats"));
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, this);
 
-    mainLayout->addLayout(form);
-    mainLayout->addStretch(1);
     mainLayout->addWidget(buttons);
 
     connect(clearButton, &QPushButton::clicked, this, [this] {
