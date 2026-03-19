@@ -56,7 +56,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     m_model = new HistoryModel(this);
     m_previewDelegate = new PreviewTextDelegate(m_client, m_table);
     m_table->setModel(m_model);
-    m_table->setItemDelegateForColumn(HistoryModel::PreviewColumn, m_previewDelegate);
+    m_table->setItemDelegate(m_previewDelegate);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setAlternatingRowColors(true);
@@ -80,10 +80,19 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     m_searchTimer = new QTimer(this);
     m_searchTimer->setSingleShot(true);
     m_searchTimer->setInterval(120);
+    m_newHighlightTimer = new QTimer(this);
+    m_newHighlightTimer->setInterval(1000);
+    m_newHighlightTimer->start();
 
     connect(m_searchEdit, &QLineEdit::textChanged, this,
             [this] { m_searchTimer->start(); });
     connect(m_searchTimer, &QTimer::timeout, this, &QuickPasteDialog::refreshResults);
+    connect(m_newHighlightTimer, &QTimer::timeout, this,
+            [this] {
+                if (isVisible()) {
+                    m_table->viewport()->update();
+                }
+            });
     connect(m_searchEdit, &QLineEdit::returnPressed, this,
             &QuickPasteDialog::activateCurrent);
     connect(m_table, &QTableView::doubleClicked, this,

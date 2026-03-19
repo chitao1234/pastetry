@@ -85,6 +85,9 @@ Optional arguments for both binaries:
 - Preview text line count is configurable (1-12) and applied with fixed row height per entry.
 - Preview text uses multiline rendering with last-line ellipsis when content exceeds visible lines.
 - Image entries render inline thumbnails in the Preview column with the same fixed row height as text entries.
+- Status highlighting uses edge markers (no row background fill):
+  - Pinned entries: left bookmark spine.
+  - Newly copied entries: top streak (multiple recent rows can be highlighted at once).
 
 ## Notes
 

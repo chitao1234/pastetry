@@ -51,6 +51,14 @@ QVariant HistoryModel::data(const QModelIndex &index, int role) const {
         return entry.imageBlobHash;
     }
 
+    if (role == CreatedAtMsRole) {
+        return entry.createdAtMs;
+    }
+
+    if (role == PinnedRole) {
+        return entry.pinned;
+    }
+
     if (role == Qt::TextAlignmentRole && index.column() >= FormatsColumn) {
         return Qt::AlignCenter;
     }

@@ -58,6 +58,7 @@ private:
     QPushButton *m_deleteButton = nullptr;
     QPushButton *m_clearButton = nullptr;
     QTimer *m_searchTimer = nullptr;
+    QTimer *m_newHighlightTimer = nullptr;
     int m_cursor = 0;
     bool m_closeToTrayEnabled = true;
     QVector<bool> m_visibleColumns = {true, true, true, true};

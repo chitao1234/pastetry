@@ -3,12 +3,15 @@
 #include "clip-ui/history_model.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QImage>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QRegularExpression>
 #include <QStyle>
 #include <QStyleOptionViewItem>
+#include <QTableView>
 #include <QTextLayout>
 
 namespace pastetry {
@@ -128,9 +131,78 @@ QPixmap PreviewTextDelegate::imageForHash(const QString &hash, int targetSide) c
     return pixmap;
 }
 
+bool PreviewTextDelegate::isRowNew(const QModelIndex &index) const {
+    const qint64 createdAtMs = index.data(HistoryModel::CreatedAtMsRole).toLongLong();
+    if (createdAtMs <= 0) {
+        return false;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    return (now - createdAtMs) <= m_newEntryTtlMs;
+}
+
+bool PreviewTextDelegate::isFirstVisibleColumn(const QStyleOptionViewItem &option,
+                                               const QModelIndex &index) const {
+    const auto *table = qobject_cast<const QTableView *>(option.widget);
+    if (!table || !table->model()) {
+        return index.column() == 0;
+    }
+
+    for (int column = 0; column < table->model()->columnCount(); ++column) {
+        if (!table->isColumnHidden(column)) {
+            return index.column() == column;
+        }
+    }
+
+    return index.column() == 0;
+}
+
+void PreviewTextDelegate::drawStatusMarkers(QPainter *painter,
+                                            const QStyleOptionViewItem &option,
+                                            const QModelIndex &index) const {
+    const bool pinned = index.data(HistoryModel::PinnedRole).toBool();
+    const bool isNew = isRowNew(index);
+    if (!pinned && !isNew) {
+        return;
+    }
+
+    const QRect rect = option.rect;
+    if (!rect.isValid()) {
+        return;
+    }
+
+    painter->save();
+
+    if (isNew) {
+        const QColor streakColor = QColor(230, 145, 45);
+        painter->fillRect(QRect(rect.left(), rect.top(), rect.width(), 2), streakColor);
+    }
+
+    if (pinned && isFirstVisibleColumn(option, index)) {
+        const QColor spineColor = QColor(38, 122, 201);
+        const QRect spineRect(rect.left(), rect.top(), 4, rect.height());
+        painter->fillRect(spineRect, spineColor);
+
+        QPainterPath notch;
+        notch.moveTo(spineRect.left(), spineRect.top() + 8);
+        notch.lineTo(spineRect.left() + spineRect.width(), spineRect.top() + 12);
+        notch.lineTo(spineRect.left(), spineRect.top() + 16);
+        notch.closeSubpath();
+        painter->fillPath(notch, option.palette.base());
+    }
+
+    painter->restore();
+}
+
 void PreviewTextDelegate::paint(QPainter *painter,
                                 const QStyleOptionViewItem &option,
                                 const QModelIndex &index) const {
+    if (index.column() != HistoryModel::PreviewColumn) {
+        QStyledItemDelegate::paint(painter, option, index);
+        drawStatusMarkers(painter, option, index);
+        return;
+    }
+
     QStyleOptionViewItem opt(option);
     initStyleOption(&opt, index);
 
@@ -187,6 +259,7 @@ void PreviewTextDelegate::paint(QPainter *painter,
     }
 
     if (suppressImagePlaceholderText) {
+        drawStatusMarkers(painter, opt, index);
         return;
     }
 
@@ -221,6 +294,7 @@ void PreviewTextDelegate::paint(QPainter *painter,
     }
 
     painter->restore();
+    drawStatusMarkers(painter, opt, index);
 }
 
 }  // namespace pastetry

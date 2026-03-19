@@ -52,6 +52,7 @@ private:
     QTableView *m_table = nullptr;
     PreviewTextDelegate *m_previewDelegate = nullptr;
     QTimer *m_searchTimer = nullptr;
+    QTimer *m_newHighlightTimer = nullptr;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;
 };

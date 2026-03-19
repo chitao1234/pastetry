@@ -20,6 +20,8 @@ public:
 
     enum Role {
         ImageBlobHashRole = Qt::UserRole + 1,
+        CreatedAtMsRole = Qt::UserRole + 2,
+        PinnedRole = Qt::UserRole + 3,
     };
 
     explicit HistoryModel(QObject *parent = nullptr);

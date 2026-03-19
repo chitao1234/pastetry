@@ -26,9 +26,15 @@ private:
     QStringList wrappedLines(const QString &text, const QFont &font,
                              int maxWidth) const;
     QPixmap imageForHash(const QString &hash, int targetSide) const;
+    void drawStatusMarkers(QPainter *painter, const QStyleOptionViewItem &option,
+                           const QModelIndex &index) const;
+    bool isRowNew(const QModelIndex &index) const;
+    bool isFirstVisibleColumn(const QStyleOptionViewItem &option,
+                              const QModelIndex &index) const;
 
     IpcClient m_client;
     int m_maxLines = 2;
+    qint64 m_newEntryTtlMs = 45 * 1000;
     mutable QHash<QString, QPixmap> m_imageCache;
     mutable QHash<QString, bool> m_failedImageHashes;
 };
