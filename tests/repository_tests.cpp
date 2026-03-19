@@ -14,6 +14,8 @@ private slots:
     void regexSearchValidationAndResults();
     void regexStrictModeFindsOlderMatches();
     void advancedSearchFiltersAndErrors();
+    void preservesFormatInsertionOrder();
+    void persistsCapturePolicy();
 };
 
 void RepositoryTests::insertAndReadBack() {
@@ -237,6 +239,71 @@ void RepositoryTests::advancedSearchFiltersAndErrors() {
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(!invalid.queryValid);
     QVERIFY(!invalid.queryError.isEmpty());
+}
+
+void RepositoryTests::preservesFormatInsertionOrder() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-format-order");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry entry;
+    entry.sourceApp = "order-test";
+    entry.preview = "ordered formats";
+    entry.formats = {
+        CapturedFormat{"application/x-custom", QByteArray("A")},
+        CapturedFormat{"text/plain", QByteArray("B")},
+        CapturedFormat{"text/html", QByteArray("<b>C</b>")},
+    };
+
+    const qint64 id = repo.insertEntry(entry, &error);
+    QVERIFY2(id > 0, qPrintable(error));
+
+    const EntryDetail detail = repo.getEntryDetail(id, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(detail.formats.size(), 3);
+    QCOMPARE(detail.formats.at(0).mimeType, QString("application/x-custom"));
+    QCOMPARE(detail.formats.at(1).mimeType, QString("text/plain"));
+    QCOMPARE(detail.formats.at(2).mimeType, QString("text/html"));
+    QCOMPARE(detail.formats.at(0).formatOrder, 0);
+    QCOMPARE(detail.formats.at(1).formatOrder, 1);
+    QCOMPARE(detail.formats.at(2).formatOrder, 2);
+}
+
+void RepositoryTests::persistsCapturePolicy() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-policy");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturePolicy policy;
+    policy.profile = CaptureProfile::Broad;
+    policy.customAllowlistPatterns = {
+        QStringLiteral("application/x-special"),
+        QStringLiteral("image/*"),
+    };
+    policy.maxFormatBytes = 5 * 1024 * 1024;
+    policy.maxEntryBytes = 25 * 1024 * 1024;
+    QVERIFY2(repo.saveCapturePolicy(policy, &error), qPrintable(error));
+
+    CapturePolicy loaded;
+    QVERIFY2(repo.loadCapturePolicy(&loaded, &error), qPrintable(error));
+    QCOMPARE(loaded.profile, CaptureProfile::Broad);
+    QCOMPARE(loaded.customAllowlistPatterns.size(), 2);
+    QCOMPARE(loaded.customAllowlistPatterns.at(0), QString("application/x-special"));
+    QCOMPARE(loaded.customAllowlistPatterns.at(1), QString("image/*"));
+    QCOMPARE(loaded.maxFormatBytes, 5 * 1024 * 1024);
+    QCOMPARE(loaded.maxEntryBytes, 25 * 1024 * 1024);
 }
 
 QTEST_APPLESS_MAIN(RepositoryTests)

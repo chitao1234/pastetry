@@ -4,6 +4,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCborArray>
 #include <QCborMap>
 #include <QIcon>
 #include <QLocalServer>
@@ -148,6 +149,13 @@ bool AppController::initialize(QString *error) {
                                        m_trayIcon->isVisible());
     applyShortcutSetting();
     checkDaemonConnectivity(true);
+    QString capturePolicyError;
+    if (!loadCapturePolicyFromDaemon(&capturePolicyError) &&
+        !capturePolicyError.trimmed().isEmpty()) {
+        qWarning().noquote()
+            << QStringLiteral("Failed to load capture policy from daemon: %1")
+                   .arg(capturePolicyError);
+    }
     m_daemonHealthTimer.start();
 
     if (!m_startToTray || !m_trayIcon || !m_trayIcon->isVisible()) {
@@ -210,10 +218,20 @@ void AppController::showQuickPastePopup() {
 }
 
 void AppController::openSettings() {
+    QString policyLoadError;
+    if (!loadCapturePolicyFromDaemon(&policyLoadError) &&
+        !policyLoadError.trimmed().isEmpty()) {
+        QMessageBox::warning(
+            &m_mainWindow, QStringLiteral("Capture policy unavailable"),
+            QStringLiteral("Could not load rich-format capture policy from daemon.\n\n"
+                           "Reason: %1")
+                .arg(policyLoadError));
+    }
+
     SettingsDialog dialog(&m_mainWindow);
     dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
                      m_historyColumns, m_quickPasteColumns, m_previewLineCount,
-                     m_regexStrictFullScan);
+                     m_regexStrictFullScan, m_capturePolicy);
 
     GlobalShortcutService probeShortcutService(&dialog);
     auto updateShortcutAvailability = [&](const QKeySequence &candidateShortcut) {
@@ -234,6 +252,18 @@ void AppController::openSettings() {
     };
 
     auto applyFromDialog = [&]() {
+        const CapturePolicy requestedPolicy = dialog.capturePolicy();
+        QString policyApplyError;
+        if (!applyCapturePolicyToDaemon(requestedPolicy, &policyApplyError)) {
+            QMessageBox::warning(
+                &dialog, QStringLiteral("Capture policy apply failed"),
+                QStringLiteral("Failed to update daemon capture policy.\n\nReason: %1")
+                    .arg(policyApplyError.isEmpty()
+                             ? QStringLiteral("Unknown error")
+                             : policyApplyError));
+            return;
+        }
+
         m_shortcut = dialog.shortcut();
         m_startToTray = dialog.startToTray();
         m_historyColumns = normalizedColumns(dialog.historyColumns());
@@ -249,7 +279,7 @@ void AppController::openSettings() {
         saveSettings();
         dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
                          m_historyColumns, m_quickPasteColumns, m_previewLineCount,
-                         m_regexStrictFullScan);
+                         m_regexStrictFullScan, m_capturePolicy);
     };
 
     connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
@@ -414,6 +444,83 @@ void AppController::notifyDaemonRecovered() {
                                 QStringLiteral("Connection to pastetry-clipd restored."),
                                 QSystemTrayIcon::Information, 2500);
     }
+
+    QString policyError;
+    if (!loadCapturePolicyFromDaemon(&policyError) && !policyError.trimmed().isEmpty()) {
+        qWarning().noquote()
+            << QStringLiteral("Failed to refresh capture policy after daemon recovery: %1")
+                   .arg(policyError);
+    }
+}
+
+bool AppController::loadCapturePolicyFromDaemon(QString *error) {
+    QCborMap params;
+    QString requestError;
+    const QCborMap result =
+        m_client.request(QStringLiteral("GetCapturePolicy"), params, 1800, &requestError);
+    if (!requestError.isEmpty()) {
+        if (error) {
+            *error = requestError;
+        }
+        return false;
+    }
+
+    const QString profileText = result.value(QStringLiteral("profile")).toString();
+    const qint64 maxFormatBytes = result.value(QStringLiteral("max_format_bytes")).toInteger();
+    const qint64 maxEntryBytes = result.value(QStringLiteral("max_entry_bytes")).toInteger();
+    if (profileText.trimmed().isEmpty() || maxFormatBytes <= 0 || maxEntryBytes <= 0) {
+        if (error) {
+            *error = QStringLiteral("Invalid capture policy payload from daemon");
+        }
+        return false;
+    }
+
+    CapturePolicy loaded;
+    loaded.profile = captureProfileFromString(profileText);
+    loaded.maxFormatBytes = maxFormatBytes;
+    loaded.maxEntryBytes = maxEntryBytes;
+
+    const QCborValue allowlistValue = result.value(QStringLiteral("custom_allowlist"));
+    if (allowlistValue.isArray()) {
+        for (const QCborValue &item : allowlistValue.toArray()) {
+            const QString pattern = item.toString().trimmed();
+            if (!pattern.isEmpty()) {
+                loaded.customAllowlistPatterns.push_back(pattern);
+            }
+        }
+    }
+
+    m_capturePolicy = loaded;
+    return true;
+}
+
+bool AppController::applyCapturePolicyToDaemon(const CapturePolicy &policy, QString *error) {
+    QCborArray customAllowlist;
+    for (const QString &pattern : policy.customAllowlistPatterns) {
+        const QString trimmed = pattern.trimmed();
+        if (!trimmed.isEmpty()) {
+            customAllowlist.append(trimmed);
+        }
+    }
+
+    QCborMap params;
+    params.insert(QStringLiteral("profile"), captureProfileToString(policy.profile));
+    params.insert(QStringLiteral("custom_allowlist"), customAllowlist);
+    params.insert(QStringLiteral("max_format_bytes"), policy.maxFormatBytes);
+    params.insert(QStringLiteral("max_entry_bytes"), policy.maxEntryBytes);
+
+    QString requestError;
+    const QCborMap result =
+        m_client.request(QStringLiteral("SetCapturePolicy"), params, 2500, &requestError);
+    if (!requestError.isEmpty()) {
+        if (error) {
+            *error = requestError;
+        }
+        return false;
+    }
+
+    Q_UNUSED(result);
+    return loadCapturePolicyFromDaemon(error);
 }
 
 void AppController::applyViewSettings() {

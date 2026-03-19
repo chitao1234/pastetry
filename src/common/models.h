@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace pastetry {
@@ -23,6 +24,7 @@ struct FormatDescriptor {
     QString mimeType;
     qint64 byteSize = 0;
     QString blobHash;
+    int formatOrder = 0;
 };
 
 struct EntrySummary {
@@ -87,6 +89,42 @@ struct SearchResult {
     int nextCursor = -1;
     bool queryValid = true;
     QString queryError;
+};
+
+enum class CaptureProfile {
+    Strict = 0,
+    Balanced = 1,
+    Broad = 2,
+};
+
+inline QString captureProfileToString(CaptureProfile profile) {
+    switch (profile) {
+        case CaptureProfile::Strict:
+            return QStringLiteral("strict");
+        case CaptureProfile::Broad:
+            return QStringLiteral("broad");
+        case CaptureProfile::Balanced:
+        default:
+            return QStringLiteral("balanced");
+    }
+}
+
+inline CaptureProfile captureProfileFromString(const QString &profileText) {
+    const QString normalized = profileText.trimmed().toLower();
+    if (normalized == QStringLiteral("strict")) {
+        return CaptureProfile::Strict;
+    }
+    if (normalized == QStringLiteral("broad")) {
+        return CaptureProfile::Broad;
+    }
+    return CaptureProfile::Balanced;
+}
+
+struct CapturePolicy {
+    CaptureProfile profile = CaptureProfile::Balanced;
+    QStringList customAllowlistPatterns;
+    qint64 maxFormatBytes = 10 * 1024 * 1024;
+    qint64 maxEntryBytes = 32 * 1024 * 1024;
 };
 
 }  // namespace pastetry

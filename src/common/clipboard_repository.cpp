@@ -826,9 +826,20 @@ bool ClipboardRepository::initialize(QString *error) {
         "mime_type TEXT NOT NULL,"
         "byte_size INTEGER NOT NULL,"
         "blob_hash TEXT NOT NULL,"
+        "format_order INTEGER NOT NULL DEFAULT 0,"
         "PRIMARY KEY (entry_id, mime_type),"
         "FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE"
         ")",
+        "CREATE TABLE IF NOT EXISTS capture_policy ("
+        "id INTEGER PRIMARY KEY CHECK(id = 1),"
+        "profile TEXT NOT NULL,"
+        "custom_allowlist TEXT NOT NULL DEFAULT '',"
+        "max_format_bytes INTEGER NOT NULL,"
+        "max_entry_bytes INTEGER NOT NULL"
+        ")",
+        "INSERT OR IGNORE INTO capture_policy(id, profile, custom_allowlist, "
+        "max_format_bytes, max_entry_bytes) "
+        "VALUES (1, 'balanced', '', 10485760, 33554432)",
         "CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at_ms DESC)",
         "CREATE INDEX IF NOT EXISTS idx_entry_formats_entry ON entry_formats(entry_id)",
         "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(preview, source_app)",
@@ -849,6 +860,33 @@ bool ClipboardRepository::initialize(QString *error) {
         if (!query.exec(sql)) {
             if (error) {
                 *error = query.lastError().text();
+            }
+            return false;
+        }
+    }
+
+    QSqlQuery tableInfo(m_db);
+    if (!tableInfo.exec("PRAGMA table_info(entry_formats)")) {
+        if (error) {
+            *error = tableInfo.lastError().text();
+        }
+        return false;
+    }
+
+    bool hasFormatOrder = false;
+    while (tableInfo.next()) {
+        if (tableInfo.value(1).toString() == QStringLiteral("format_order")) {
+            hasFormatOrder = true;
+            break;
+        }
+    }
+
+    if (!hasFormatOrder) {
+        QSqlQuery alter(m_db);
+        if (!alter.exec(
+                "ALTER TABLE entry_formats ADD COLUMN format_order INTEGER NOT NULL DEFAULT 0")) {
+            if (error) {
+                *error = alter.lastError().text();
             }
             return false;
         }
@@ -893,10 +931,11 @@ qint64 ClipboardRepository::insertEntry(const CapturedEntry &entry, QString *err
 
     QSqlQuery insertFormat(m_db);
     insertFormat.prepare(
-        "INSERT INTO entry_formats(entry_id, mime_type, byte_size, blob_hash) "
-        "VALUES (?, ?, ?, ?)");
+        "INSERT INTO entry_formats(entry_id, mime_type, byte_size, blob_hash, format_order) "
+        "VALUES (?, ?, ?, ?, ?)");
 
-    for (const auto &format : entry.formats) {
+    for (int order = 0; order < entry.formats.size(); ++order) {
+        const auto &format = entry.formats.at(order);
         QString blobError;
         const QString hash = m_blobStore.putBlob(m_db, format.data, &blobError);
         if (hash.isEmpty()) {
@@ -911,6 +950,7 @@ qint64 ClipboardRepository::insertEntry(const CapturedEntry &entry, QString *err
         insertFormat.bindValue(1, format.mimeType);
         insertFormat.bindValue(2, static_cast<qint64>(format.data.size()));
         insertFormat.bindValue(3, hash);
+        insertFormat.bindValue(4, order);
 
         if (!insertFormat.exec()) {
             m_db.rollback();
@@ -979,9 +1019,9 @@ EntryDetail ClipboardRepository::getEntryDetail(qint64 entryId, QString *error) 
 
     QSqlQuery formatQuery(m_db);
     formatQuery.prepare(
-        "SELECT mime_type, byte_size, blob_hash "
+        "SELECT mime_type, byte_size, blob_hash, format_order "
         "FROM entry_formats WHERE entry_id = ? "
-        "ORDER BY mime_type");
+        "ORDER BY format_order ASC, mime_type ASC");
     formatQuery.addBindValue(entryId);
     if (!formatQuery.exec()) {
         if (error) {
@@ -995,6 +1035,7 @@ EntryDetail ClipboardRepository::getEntryDetail(qint64 entryId, QString *error) 
         format.mimeType = formatQuery.value(0).toString();
         format.byteSize = formatQuery.value(1).toLongLong();
         format.blobHash = formatQuery.value(2).toString();
+        format.formatOrder = formatQuery.value(3).toInt();
         detail.formats.push_back(format);
     }
 
@@ -1003,6 +1044,73 @@ EntryDetail ClipboardRepository::getEntryDetail(qint64 entryId, QString *error) 
 
 QByteArray ClipboardRepository::loadBlob(const QString &hash, QString *error) const {
     return m_blobStore.loadBlob(hash, error);
+}
+
+bool ClipboardRepository::loadCapturePolicy(CapturePolicy *policy, QString *error) const {
+    if (!policy) {
+        if (error) {
+            *error = QStringLiteral("policy output is required");
+        }
+        return false;
+    }
+
+    QSqlQuery query(m_db);
+    query.prepare(
+        "SELECT profile, custom_allowlist, max_format_bytes, max_entry_bytes "
+        "FROM capture_policy WHERE id = 1");
+    if (!query.exec()) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return false;
+    }
+
+    if (!query.next()) {
+        if (error) {
+            *error = QStringLiteral("capture_policy row missing");
+        }
+        return false;
+    }
+
+    CapturePolicy loaded;
+    loaded.profile = captureProfileFromString(query.value(0).toString());
+    loaded.customAllowlistPatterns =
+        query.value(1).toString().split('\n', Qt::SkipEmptyParts);
+    for (QString &pattern : loaded.customAllowlistPatterns) {
+        pattern = pattern.trimmed();
+    }
+    loaded.maxFormatBytes = query.value(2).toLongLong();
+    loaded.maxEntryBytes = query.value(3).toLongLong();
+
+    *policy = loaded;
+    return true;
+}
+
+bool ClipboardRepository::saveCapturePolicy(const CapturePolicy &policy, QString *error) {
+    QStringList customLines;
+    customLines.reserve(policy.customAllowlistPatterns.size());
+    for (const QString &raw : policy.customAllowlistPatterns) {
+        const QString trimmed = raw.trimmed();
+        if (!trimmed.isEmpty()) {
+            customLines.push_back(trimmed);
+        }
+    }
+
+    QSqlQuery query(m_db);
+    query.prepare(
+        "UPDATE capture_policy SET profile = ?, custom_allowlist = ?, "
+        "max_format_bytes = ?, max_entry_bytes = ? WHERE id = 1");
+    query.addBindValue(captureProfileToString(policy.profile));
+    query.addBindValue(customLines.join('\n'));
+    query.addBindValue(policy.maxFormatBytes);
+    query.addBindValue(policy.maxEntryBytes);
+    if (!query.exec()) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return false;
+    }
+    return true;
 }
 
 bool ClipboardRepository::setPinned(qint64 entryId, bool pinned, QString *error) {

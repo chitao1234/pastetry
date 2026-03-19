@@ -28,6 +28,9 @@ private:
     QCborMap handleRequest(const QCborMap &request);
     bool activateEntry(qint64 entryId, const QString &preferredFormat, QString *error);
     CapturedEntry captureFromMimeData(const QMimeData *mimeData) const;
+    bool validateCapturePolicy(const CapturePolicy &policy, QString *error) const;
+    bool setCapturePolicy(const CapturePolicy &policy, QString *error);
+    bool loadCapturePolicy(QString *error);
     QString fingerprint(const CapturedEntry &entry) const;
 
     AppPaths m_paths;
@@ -38,6 +41,7 @@ private:
     bool m_suppressCapture = false;
     QString m_lastFingerprint;
     qint64 m_lastCaptureAtMs = 0;
+    CapturePolicy m_capturePolicy;
 };
 
 }  // namespace pastetry

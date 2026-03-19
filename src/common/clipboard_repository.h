@@ -19,6 +19,8 @@ public:
     SearchResult searchEntries(const SearchRequest &request, QString *error) const;
     EntryDetail getEntryDetail(qint64 entryId, QString *error) const;
     QByteArray loadBlob(const QString &hash, QString *error) const;
+    bool loadCapturePolicy(CapturePolicy *policy, QString *error) const;
+    bool saveCapturePolicy(const CapturePolicy &policy, QString *error);
     bool setPinned(qint64 entryId, bool pinned, QString *error);
     bool deleteEntry(qint64 entryId, QString *error);
     bool clearHistory(bool keepPinned, QString *error);

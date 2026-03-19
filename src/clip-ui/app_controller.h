@@ -43,6 +43,8 @@ private:
     void checkDaemonConnectivity(bool notifyIfUnavailable);
     void notifyDaemonUnavailable(const QString &reason);
     void notifyDaemonRecovered();
+    bool loadCapturePolicyFromDaemon(QString *error);
+    bool applyCapturePolicyToDaemon(const CapturePolicy &policy, QString *error);
     QVector<bool> parseColumns(const QString &text,
                                const QVector<bool> &fallback) const;
     QString serializeColumns(const QVector<bool> &columns) const;
@@ -64,6 +66,7 @@ private:
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrictFullScan = false;
+    CapturePolicy m_capturePolicy;
     ShortcutRegistrationState m_shortcutState = ShortcutRegistrationState::Disabled;
 
     QSystemTrayIcon *m_trayIcon = nullptr;

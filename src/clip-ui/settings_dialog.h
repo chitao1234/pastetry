@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/models.h"
+
 #include <QDialog>
 #include <QKeySequence>
 #include <QVector>
@@ -9,6 +11,8 @@ class QAbstractButton;
 class QKeySequenceEdit;
 class QLabel;
 class QSpinBox;
+class QComboBox;
+class QPlainTextEdit;
 
 namespace pastetry {
 
@@ -22,7 +26,7 @@ public:
                    const QString &shortcutStatusText,
                    const QVector<bool> &historyColumns,
                    const QVector<bool> &quickPasteColumns, int previewLineCount,
-                   bool regexStrictFullScan);
+                   bool regexStrictFullScan, const CapturePolicy &capturePolicy);
     void setShortcutStatusText(const QString &shortcutStatusText);
 
     QKeySequence shortcut() const;
@@ -31,6 +35,7 @@ public:
     QVector<bool> quickPasteColumns() const;
     int previewLineCount() const;
     bool regexStrictFullScanEnabled() const;
+    CapturePolicy capturePolicy() const;
 
 signals:
     void applyRequested();
@@ -46,6 +51,10 @@ private:
     QLabel *m_shortcutStatus = nullptr;
     QSpinBox *m_previewLines = nullptr;
     QCheckBox *m_regexStrictFullScan = nullptr;
+    QComboBox *m_captureProfile = nullptr;
+    QSpinBox *m_maxFormatMb = nullptr;
+    QSpinBox *m_maxEntryMb = nullptr;
+    QPlainTextEdit *m_customAllowlist = nullptr;
     QAbstractButton *m_applyButton = nullptr;
     QVector<QCheckBox *> m_historyColumnChecks;
     QVector<QCheckBox *> m_quickPasteColumnChecks;
@@ -56,6 +65,7 @@ private:
     QVector<bool> m_savedQuickPasteColumns;
     int m_savedPreviewLines = 2;
     bool m_savedRegexStrictFullScan = false;
+    CapturePolicy m_savedCapturePolicy;
     bool m_loadingValues = false;
 };
 

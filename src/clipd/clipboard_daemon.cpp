@@ -21,8 +21,9 @@ Q_LOGGING_CATEGORY(logClipd, "pastetry.clipd")
 
 namespace pastetry {
 namespace {
-constexpr int kMaxMimePayloadBytes = 10 * 1024 * 1024;
 constexpr int kDedupWindowMs = 300;
+constexpr qint64 kMinPolicyBytes = 1024;
+constexpr qint64 kMaxPolicyBytes = 1024LL * 1024 * 1024;
 
 QString htmlToPreview(const QString &html) {
     QString plain = html;
@@ -117,6 +118,141 @@ QByteArray makeImagePreviewPng(const QByteArray &rawImageBytes, int maxEdge) {
     }
     return pngBytes;
 }
+
+QStringList defaultAllowlistPatterns(CaptureProfile profile) {
+    switch (profile) {
+        case CaptureProfile::Strict:
+            return {
+                QStringLiteral("text/plain"),
+                QStringLiteral("text/html"),
+                QStringLiteral("text/rtf"),
+                QStringLiteral("application/rtf"),
+                QStringLiteral("text/uri-list"),
+                QStringLiteral("image/png"),
+            };
+        case CaptureProfile::Broad:
+            return {QStringLiteral("*")};
+        case CaptureProfile::Balanced:
+        default:
+            return {
+                QStringLiteral("text/plain"),
+                QStringLiteral("text/html"),
+                QStringLiteral("text/rtf"),
+                QStringLiteral("application/rtf"),
+                QStringLiteral("text/uri-list"),
+                QStringLiteral("image/png"),
+                QStringLiteral("text/*"),
+                QStringLiteral("image/*"),
+                QStringLiteral("application/x-qt-*"),
+            };
+    }
+}
+
+QStringList normalizedPatterns(const QStringList &patterns) {
+    QStringList normalized;
+    normalized.reserve(patterns.size());
+    for (const QString &raw : patterns) {
+        const QString trimmed = raw.trimmed().toLower();
+        if (trimmed.isEmpty() || trimmed.startsWith('#')) {
+            continue;
+        }
+        normalized.push_back(trimmed);
+    }
+    normalized.removeDuplicates();
+    return normalized;
+}
+
+bool wildcardMatchCaseInsensitive(const QString &pattern, const QString &value) {
+    const QRegularExpression re(
+        QRegularExpression::wildcardToRegularExpression(pattern),
+        QRegularExpression::CaseInsensitiveOption);
+    return re.match(value).hasMatch();
+}
+
+bool policyAllowsMime(const CapturePolicy &policy, const QString &mimeType) {
+    const QString normalizedMime = mimeType.trimmed().toLower();
+    if (normalizedMime.isEmpty()) {
+        return false;
+    }
+
+    QStringList patterns = defaultAllowlistPatterns(policy.profile);
+    patterns.append(normalizedPatterns(policy.customAllowlistPatterns));
+
+    for (const QString &pattern : patterns) {
+        if (wildcardMatchCaseInsensitive(pattern, normalizedMime)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QCborMap toCbor(const CapturePolicy &policy) {
+    QCborMap map;
+    map.insert(QStringLiteral("profile"), captureProfileToString(policy.profile));
+    QCborArray customAllowlist;
+    for (const QString &pattern : policy.customAllowlistPatterns) {
+        const QString trimmed = pattern.trimmed();
+        if (!trimmed.isEmpty()) {
+            customAllowlist.append(trimmed);
+        }
+    }
+    map.insert(QStringLiteral("custom_allowlist"), customAllowlist);
+    map.insert(QStringLiteral("max_format_bytes"), policy.maxFormatBytes);
+    map.insert(QStringLiteral("max_entry_bytes"), policy.maxEntryBytes);
+    return map;
+}
+
+bool capturePolicyFromCbor(const QCborMap &params, CapturePolicy *policy, QString *error) {
+    if (!policy) {
+        if (error) {
+            *error = QStringLiteral("policy output required");
+        }
+        return false;
+    }
+
+    const QString profileText = params.value(QStringLiteral("profile")).toString();
+    const QString normalizedProfile = profileText.trimmed().toLower();
+    if (normalizedProfile.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("profile is required");
+        }
+        return false;
+    }
+    if (normalizedProfile != QStringLiteral("strict") &&
+        normalizedProfile != QStringLiteral("balanced") &&
+        normalizedProfile != QStringLiteral("broad")) {
+        if (error) {
+            *error = QStringLiteral("Unknown capture profile: %1").arg(profileText);
+        }
+        return false;
+    }
+
+    CapturePolicy parsed;
+    parsed.profile = captureProfileFromString(normalizedProfile);
+    parsed.maxFormatBytes = params.value(QStringLiteral("max_format_bytes")).toInteger();
+    parsed.maxEntryBytes = params.value(QStringLiteral("max_entry_bytes")).toInteger();
+
+    const QCborValue allowlistValue = params.value(QStringLiteral("custom_allowlist"));
+    if (allowlistValue.isArray()) {
+        for (const QCborValue &item : allowlistValue.toArray()) {
+            const QString pattern = item.toString().trimmed();
+            if (!pattern.isEmpty()) {
+                parsed.customAllowlistPatterns.push_back(pattern);
+            }
+        }
+    } else if (allowlistValue.isString()) {
+        for (const QString &line :
+             allowlistValue.toString().split('\n', Qt::SkipEmptyParts)) {
+            const QString trimmed = line.trimmed();
+            if (!trimmed.isEmpty()) {
+                parsed.customAllowlistPatterns.push_back(trimmed);
+            }
+        }
+    }
+
+    *policy = parsed;
+    return true;
+}
 }  // namespace
 
 ClipboardDaemon::ClipboardDaemon(AppPaths paths, QObject *parent)
@@ -126,6 +262,10 @@ ClipboardDaemon::ClipboardDaemon(AppPaths paths, QObject *parent)
 
 bool ClipboardDaemon::start(QString *error) {
     if (!m_repo.open(error) || !m_repo.initialize(error)) {
+        return false;
+    }
+
+    if (!loadCapturePolicy(error)) {
         return false;
     }
 
@@ -161,19 +301,51 @@ CapturedEntry ClipboardDaemon::captureFromMimeData(const QMimeData *mimeData) co
     }
 
     QSet<QString> seen;
+    qint64 totalBytes = 0;
 
-    auto addFormat = [&](const QString &mimeType, const QByteArray &data) {
-        if (seen.contains(mimeType) || data.isEmpty() || data.size() > kMaxMimePayloadBytes) {
+    auto addFormat = [&](const QString &mimeType, const QByteArray &data,
+                         const QString &sourceTag) {
+        const QString normalizedMime = mimeType.trimmed().toLower();
+        if (normalizedMime.isEmpty()) {
             return;
         }
-        seen.insert(mimeType);
-        entry.formats.push_back(CapturedFormat{mimeType, data});
+        if (seen.contains(normalizedMime)) {
+            return;
+        }
+        if (data.isEmpty()) {
+            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
+                             << "- empty payload";
+            return;
+        }
+        if (!policyAllowsMime(m_capturePolicy, normalizedMime)) {
+            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
+                             << "- not allowed by capture policy";
+            return;
+        }
+        if (data.size() > m_capturePolicy.maxFormatBytes) {
+            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
+                             << "- exceeds per-format cap";
+            return;
+        }
+        if ((totalBytes + data.size()) > m_capturePolicy.maxEntryBytes) {
+            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
+                             << "- exceeds per-entry cap";
+            return;
+        }
+        seen.insert(normalizedMime);
+        totalBytes += data.size();
+        entry.formats.push_back(CapturedFormat{normalizedMime, data});
     };
+
+    const QStringList formats = mimeData->formats();
+    for (const QString &mimeType : formats) {
+        addFormat(mimeType, mimeData->data(mimeType), QStringLiteral("mimeData->formats"));
+    }
 
     if (mimeData->hasText()) {
         const QString text = mimeData->text();
         entry.preview = normalizeTextPreview(text).left(2048);
-        addFormat("text/plain", text.toUtf8());
+        addFormat(QStringLiteral("text/plain"), text.toUtf8(), QStringLiteral("typed-text"));
     }
 
     if (mimeData->hasHtml()) {
@@ -181,25 +353,38 @@ CapturedEntry ClipboardDaemon::captureFromMimeData(const QMimeData *mimeData) co
         if (entry.preview.isEmpty()) {
             entry.preview = htmlToPreview(html).left(200);
         }
-        addFormat("text/html", html.toUtf8());
+        addFormat(QStringLiteral("text/html"), html.toUtf8(), QStringLiteral("typed-html"));
     }
 
     if (mimeData->hasFormat("text/rtf")) {
-        addFormat("text/rtf", mimeData->data("text/rtf"));
+        addFormat(QStringLiteral("text/rtf"), mimeData->data("text/rtf"),
+                  QStringLiteral("typed-rtf"));
     }
     if (mimeData->hasFormat("application/rtf")) {
-        addFormat("application/rtf", mimeData->data("application/rtf"));
+        addFormat(QStringLiteral("application/rtf"), mimeData->data("application/rtf"),
+                  QStringLiteral("typed-rtf"));
     }
 
     if (mimeData->hasImage()) {
         const auto variant = mimeData->imageData();
         const QImage image = variant.value<QImage>();
         if (!image.isNull()) {
-            QByteArray pngBytes;
-            QBuffer buffer(&pngBytes);
-            buffer.open(QIODevice::WriteOnly);
-            image.save(&buffer, "PNG");
-            addFormat("image/png", pngBytes);
+            bool hasImageMime = false;
+            for (const QString &mime : seen) {
+                if (mime.startsWith(QStringLiteral("image/"))) {
+                    hasImageMime = true;
+                    break;
+                }
+            }
+
+            if (!hasImageMime) {
+                QByteArray pngBytes;
+                QBuffer buffer(&pngBytes);
+                buffer.open(QIODevice::WriteOnly);
+                image.save(&buffer, "PNG");
+                addFormat(QStringLiteral("image/png"), pngBytes,
+                          QStringLiteral("typed-image-fallback"));
+            }
             if (entry.preview.isEmpty()) {
                 entry.preview = QStringLiteral("[Image] %1x%2")
                                     .arg(image.width())
@@ -214,7 +399,7 @@ CapturedEntry ClipboardDaemon::captureFromMimeData(const QMimeData *mimeData) co
             uriList += url.toEncoded();
             uriList += '\n';
         }
-        addFormat("text/uri-list", uriList);
+        addFormat(QStringLiteral("text/uri-list"), uriList, QStringLiteral("typed-urls"));
         if (entry.preview.isEmpty() && !mimeData->urls().isEmpty()) {
             entry.preview = QStringLiteral("[Files] %1 item(s)").arg(mimeData->urls().size());
         }
@@ -333,6 +518,21 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         return ipc::makeResponse(id, payload);
     }
 
+    if (method == "GetCapturePolicy") {
+        return ipc::makeResponse(id, toCbor(m_capturePolicy));
+    }
+
+    if (method == "SetCapturePolicy") {
+        CapturePolicy policy;
+        if (!capturePolicyFromCbor(params, &policy, &error)) {
+            return ipc::makeError(id, error);
+        }
+        if (!setCapturePolicy(policy, &error)) {
+            return ipc::makeError(id, error);
+        }
+        return ipc::makeResponse(id, toCbor(m_capturePolicy));
+    }
+
     if (method == "ActivateEntry") {
         const qint64 entryId = params.value("entry_id").toInteger();
         const QString preferredFormat = params.value("preferred_format").toString();
@@ -413,8 +613,30 @@ bool ClipboardDaemon::activateEntry(qint64 entryId, const QString &preferredForm
 
     auto mimeData = std::make_unique<QMimeData>();
 
-    bool appliedPreferred = preferredFormat.isEmpty();
-    for (const auto &format : detail.formats) {
+    QVector<FormatDescriptor> orderedFormats = detail.formats;
+    if (!preferredFormat.isEmpty()) {
+        const QString normalizedPreferred = preferredFormat.trimmed().toLower();
+        int preferredIndex = -1;
+        for (int i = 0; i < orderedFormats.size(); ++i) {
+            if (orderedFormats.at(i).mimeType.compare(normalizedPreferred, Qt::CaseInsensitive) ==
+                0) {
+                preferredIndex = i;
+                break;
+            }
+        }
+        if (preferredIndex < 0) {
+            if (error) {
+                *error = QStringLiteral("Preferred format unavailable");
+            }
+            return false;
+        }
+        if (preferredIndex > 0) {
+            const FormatDescriptor preferred = orderedFormats.takeAt(preferredIndex);
+            orderedFormats.prepend(preferred);
+        }
+    }
+
+    for (const auto &format : orderedFormats) {
         QString blobError;
         const QByteArray bytes = m_repo.loadBlob(format.blobHash, &blobError);
         if (!blobError.isEmpty()) {
@@ -422,10 +644,6 @@ bool ClipboardDaemon::activateEntry(qint64 entryId, const QString &preferredForm
                 *error = blobError;
             }
             return false;
-        }
-
-        if (!preferredFormat.isEmpty() && format.mimeType == preferredFormat) {
-            appliedPreferred = true;
         }
 
         mimeData->setData(format.mimeType, bytes);
@@ -445,17 +663,85 @@ bool ClipboardDaemon::activateEntry(qint64 entryId, const QString &preferredForm
         }
     }
 
-    if (!appliedPreferred) {
-        if (error) {
-            *error = QStringLiteral("Preferred format unavailable");
-        }
-        return false;
-    }
-
     m_suppressCapture = true;
     m_clipboard->setMimeData(mimeData.release());
     QTimer::singleShot(250, this, [this] { m_suppressCapture = false; });
 
+    return true;
+}
+
+bool ClipboardDaemon::validateCapturePolicy(const CapturePolicy &policy,
+                                            QString *error) const {
+    if (policy.maxFormatBytes < kMinPolicyBytes || policy.maxFormatBytes > kMaxPolicyBytes) {
+        if (error) {
+            *error = QStringLiteral("max_format_bytes must be between %1 and %2")
+                         .arg(kMinPolicyBytes)
+                         .arg(kMaxPolicyBytes);
+        }
+        return false;
+    }
+    if (policy.maxEntryBytes < kMinPolicyBytes || policy.maxEntryBytes > kMaxPolicyBytes) {
+        if (error) {
+            *error = QStringLiteral("max_entry_bytes must be between %1 and %2")
+                         .arg(kMinPolicyBytes)
+                         .arg(kMaxPolicyBytes);
+        }
+        return false;
+    }
+    if (policy.maxEntryBytes < policy.maxFormatBytes) {
+        if (error) {
+            *error =
+                QStringLiteral("max_entry_bytes must be >= max_format_bytes");
+        }
+        return false;
+    }
+
+    for (const QString &rawPattern : policy.customAllowlistPatterns) {
+        const QString pattern = rawPattern.trimmed();
+        if (pattern.isEmpty() || pattern.startsWith('#')) {
+            continue;
+        }
+        if (!pattern.contains('/')) {
+            if (error) {
+                *error = QStringLiteral("Invalid MIME allowlist pattern: %1").arg(pattern);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ClipboardDaemon::setCapturePolicy(const CapturePolicy &policy, QString *error) {
+    CapturePolicy normalized = policy;
+    normalized.customAllowlistPatterns = normalizedPatterns(policy.customAllowlistPatterns);
+
+    if (!validateCapturePolicy(normalized, error)) {
+        return false;
+    }
+
+    if (!m_repo.saveCapturePolicy(normalized, error)) {
+        return false;
+    }
+
+    m_capturePolicy = normalized;
+    qCInfo(logClipd) << "Updated capture policy profile"
+                     << captureProfileToString(m_capturePolicy.profile)
+                     << "maxFormatBytes" << m_capturePolicy.maxFormatBytes
+                     << "maxEntryBytes" << m_capturePolicy.maxEntryBytes;
+    return true;
+}
+
+bool ClipboardDaemon::loadCapturePolicy(QString *error) {
+    CapturePolicy loaded;
+    if (!m_repo.loadCapturePolicy(&loaded, error)) {
+        return false;
+    }
+    loaded.customAllowlistPatterns = normalizedPatterns(loaded.customAllowlistPatterns);
+    if (!validateCapturePolicy(loaded, error)) {
+        return false;
+    }
+    m_capturePolicy = loaded;
     return true;
 }
 
