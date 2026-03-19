@@ -7,6 +7,7 @@
 #include <QCborMap>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -15,6 +16,7 @@
 #include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -54,6 +56,31 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
 
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText("Search clipboard history...");
+    auto *modeWidget = new QWidget(this);
+    auto *modeLayout = new QHBoxLayout(modeWidget);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(2);
+
+    m_plainModeButton = new QToolButton(modeWidget);
+    m_plainModeButton->setText(QStringLiteral("Plain"));
+    m_plainModeButton->setCheckable(true);
+    m_plainModeButton->setAutoExclusive(true);
+    m_regexModeButton = new QToolButton(modeWidget);
+    m_regexModeButton->setText(QStringLiteral("Regex"));
+    m_regexModeButton->setCheckable(true);
+    m_regexModeButton->setAutoExclusive(true);
+    m_advancedModeButton = new QToolButton(modeWidget);
+    m_advancedModeButton->setText(QStringLiteral("Advanced"));
+    m_advancedModeButton->setCheckable(true);
+    m_advancedModeButton->setAutoExclusive(true);
+
+    modeLayout->addWidget(m_plainModeButton);
+    modeLayout->addWidget(m_regexModeButton);
+    modeLayout->addWidget(m_advancedModeButton);
+
+    m_searchErrorLabel = new QLabel(this);
+    m_searchErrorLabel->setStyleSheet(QStringLiteral("color: #b3412f;"));
+    m_searchErrorLabel->setVisible(false);
 
     m_loadMoreButton = new QPushButton("Load More", this);
     m_activateButton = new QPushButton("Activate", this);
@@ -62,6 +89,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     m_clearButton = new QPushButton("Clear Unpinned", this);
 
     toolbar->addWidget(m_searchEdit, 1);
+    toolbar->addWidget(modeWidget);
     toolbar->addWidget(m_loadMoreButton);
     toolbar->addWidget(m_activateButton);
     toolbar->addWidget(m_pinButton);
@@ -92,6 +120,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
     layout->addLayout(toolbar);
+    layout->addWidget(m_searchErrorLabel);
     layout->addWidget(m_table);
     setCentralWidget(central);
 
@@ -107,6 +136,18 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     connect(m_searchTimer, &QTimer::timeout, this, [this] { loadInitial(); });
     connect(m_newHighlightTimer, &QTimer::timeout, this,
             [this] { m_table->viewport()->update(); });
+    connect(m_plainModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Plain);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
+    connect(m_regexModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Regex);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
+    connect(m_advancedModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Advanced);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
 
     connect(m_loadMoreButton, &QPushButton::clicked, this, &MainWindow::loadMore);
     connect(m_activateButton, &QPushButton::clicked, this, &MainWindow::activateSelected);
@@ -117,6 +158,7 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &MainWindow::showHeaderContextMenu);
 
+    applySearchModeButtons();
     applyTableLayout();
     loadInitial();
 }
@@ -145,6 +187,29 @@ void MainWindow::setPreviewLineCount(int lineCount) {
     applyTableLayout();
 }
 
+void MainWindow::setSearchMode(SearchMode mode) {
+    if (m_searchMode == mode) {
+        return;
+    }
+    m_searchMode = mode;
+    applySearchModeButtons();
+    loadInitial();
+}
+
+SearchMode MainWindow::searchMode() const {
+    return m_searchMode;
+}
+
+void MainWindow::setRegexStrict(bool enabled) {
+    if (m_regexStrict == enabled) {
+        return;
+    }
+    m_regexStrict = enabled;
+    if (m_searchMode == SearchMode::Regex) {
+        loadInitial();
+    }
+}
+
 qint64 MainWindow::selectedEntryId() const {
     const auto indexes = m_table->selectionModel()->selectedRows();
     if (indexes.isEmpty()) {
@@ -159,12 +224,25 @@ void MainWindow::refresh(bool resetCursor) {
     params.insert(QStringLiteral("query"), m_searchEdit->text());
     params.insert(QStringLiteral("cursor"), resetCursor ? 0 : m_cursor);
     params.insert(QStringLiteral("limit"), 120);
+    params.insert(QStringLiteral("mode"), searchModeToString(m_searchMode));
+    params.insert(QStringLiteral("regex_strict"), m_regexStrict);
 
     const QCborMap result = m_client.request("SearchEntries", params, 2500, &error);
     if (!error.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("Search failed: %1").arg(error), 4000);
         return;
     }
+
+    const bool queryValid =
+        !result.contains(QStringLiteral("query_valid")) ||
+        result.value(QStringLiteral("query_valid")).toBool();
+    const QString queryError = result.value(QStringLiteral("query_error")).toString();
+    if (!queryValid) {
+        setSearchError(queryError);
+        statusBar()->showMessage(QStringLiteral("Invalid query"), 2500);
+        return;
+    }
+    setSearchError(QString());
 
     QVector<EntrySummary> entries = parseSummaries(result.value("entries").toArray());
     const int nextCursor = result.value("next_cursor").toInteger();
@@ -199,6 +277,22 @@ void MainWindow::applyTableLayout() {
     const int rowHeight =
         m_previewDelegate->sizeHint(option, previewIndex).height();
     m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
+}
+
+void MainWindow::setSearchError(const QString &message) {
+    const QString trimmed = message.trimmed();
+    m_searchErrorLabel->setVisible(!trimmed.isEmpty());
+    m_searchErrorLabel->setText(trimmed);
+}
+
+void MainWindow::applySearchModeButtons() {
+    if (!m_plainModeButton || !m_regexModeButton || !m_advancedModeButton) {
+        return;
+    }
+
+    m_plainModeButton->setChecked(m_searchMode == SearchMode::Plain);
+    m_regexModeButton->setChecked(m_searchMode == SearchMode::Regex);
+    m_advancedModeButton->setChecked(m_searchMode == SearchMode::Advanced);
 }
 
 void MainWindow::showHeaderContextMenu(const QPoint &position) {

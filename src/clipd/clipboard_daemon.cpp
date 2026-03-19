@@ -292,11 +292,15 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
     QString error;
 
     if (method == "SearchEntries") {
-        const QString query = params.value("query").toString();
-        const int cursor = params.value("cursor").toInteger();
-        const int limit = params.value("limit").toInteger();
+        SearchRequest request;
+        request.query = params.value(QStringLiteral("query")).toString();
+        request.cursor = params.value(QStringLiteral("cursor")).toInteger();
+        request.limit = params.value(QStringLiteral("limit")).toInteger();
+        request.mode = searchModeFromString(
+            params.value(QStringLiteral("mode")).toString());
+        request.regexStrict = params.value(QStringLiteral("regex_strict")).toBool();
 
-        const SearchResult result = m_repo.searchEntries(query, cursor, limit, &error);
+        const SearchResult result = m_repo.searchEntries(request, &error);
         if (!error.isEmpty()) {
             return ipc::makeError(id, error);
         }
@@ -309,6 +313,8 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         QCborMap payload;
         payload.insert(QStringLiteral("entries"), entries);
         payload.insert(QStringLiteral("next_cursor"), result.nextCursor);
+        payload.insert(QStringLiteral("query_valid"), result.queryValid);
+        payload.insert(QStringLiteral("query_error"), result.queryError);
         return ipc::makeResponse(id, payload);
     }
 

@@ -20,7 +20,8 @@ public:
     void setValues(const QKeySequence &shortcut, bool startToTray,
                    const QString &shortcutStatusText,
                    const QVector<bool> &historyColumns,
-                   const QVector<bool> &quickPasteColumns, int previewLineCount);
+                   const QVector<bool> &quickPasteColumns, int previewLineCount,
+                   bool regexStrictFullScan);
     void setShortcutStatusText(const QString &shortcutStatusText);
 
     QKeySequence shortcut() const;
@@ -28,6 +29,7 @@ public:
     QVector<bool> historyColumns() const;
     QVector<bool> quickPasteColumns() const;
     int previewLineCount() const;
+    bool regexStrictFullScanEnabled() const;
 
 signals:
     void applyRequested();
@@ -39,6 +41,7 @@ private:
     QCheckBox *m_startToTray = nullptr;
     QLabel *m_shortcutStatus = nullptr;
     QSpinBox *m_previewLines = nullptr;
+    QCheckBox *m_regexStrictFullScan = nullptr;
     QVector<QCheckBox *> m_historyColumnChecks;
     QVector<QCheckBox *> m_quickPasteColumnChecks;
 };

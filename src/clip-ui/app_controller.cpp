@@ -23,6 +23,8 @@ constexpr const char *kSettingsPopupGeometry = "popup/last_geometry";
 constexpr const char *kSettingsHistoryColumns = "ui/history_columns";
 constexpr const char *kSettingsQuickColumns = "ui/quick_paste_columns";
 constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
+constexpr const char *kSettingsSearchMode = "search/mode";
+constexpr const char *kSettingsRegexStrict = "search/regex_strict_full_scan";
 
 }  // namespace
 
@@ -66,6 +68,18 @@ AppController::AppController(AppPaths paths, QObject *parent)
     connect(&m_quickPasteDialog, &QuickPasteDialog::visibleColumnsChanged, this,
             [this](const QVector<bool> &visibleColumns) {
                 m_quickPasteColumns = normalizedColumns(visibleColumns);
+                saveSettings();
+            });
+    connect(&m_mainWindow, &MainWindow::searchModeChanged, this,
+            [this](const QString &modeText) {
+                m_searchMode = searchModeFromString(modeText);
+                m_quickPasteDialog.setSearchMode(m_searchMode);
+                saveSettings();
+            });
+    connect(&m_quickPasteDialog, &QuickPasteDialog::searchModeChanged, this,
+            [this](const QString &modeText) {
+                m_searchMode = searchModeFromString(modeText);
+                m_mainWindow.setSearchMode(m_searchMode);
                 saveSettings();
             });
 
@@ -173,7 +187,8 @@ void AppController::showQuickPastePopup() {
 void AppController::openSettings() {
     SettingsDialog dialog(&m_mainWindow);
     dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
-                     m_historyColumns, m_quickPasteColumns, m_previewLineCount);
+                     m_historyColumns, m_quickPasteColumns, m_previewLineCount,
+                     m_regexStrictFullScan);
 
     auto applyFromDialog = [&]() {
         m_shortcut = dialog.shortcut();
@@ -181,6 +196,7 @@ void AppController::openSettings() {
         m_historyColumns = normalizedColumns(dialog.historyColumns());
         m_quickPasteColumns = normalizedColumns(dialog.quickPasteColumns());
         m_previewLineCount = qBound(1, dialog.previewLineCount(), 12);
+        m_regexStrictFullScan = dialog.regexStrictFullScanEnabled();
 
         m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
                                            m_trayIcon->isVisible());
@@ -269,6 +285,9 @@ void AppController::loadSettings() {
     m_quickPasteColumns = parseColumns(m_settings.value(kSettingsQuickColumns).toString(),
                                        m_quickPasteColumns);
     m_previewLineCount = qBound(1, m_settings.value(kSettingsPreviewLines, 2).toInt(), 12);
+    m_searchMode = searchModeFromString(
+        m_settings.value(kSettingsSearchMode, QStringLiteral("plain")).toString());
+    m_regexStrictFullScan = m_settings.value(kSettingsRegexStrict, false).toBool();
 
     m_historyColumns = normalizedColumns(m_historyColumns);
     m_quickPasteColumns = normalizedColumns(m_quickPasteColumns);
@@ -281,6 +300,8 @@ void AppController::saveSettings() {
     m_settings.setValue(kSettingsHistoryColumns, serializeColumns(m_historyColumns));
     m_settings.setValue(kSettingsQuickColumns, serializeColumns(m_quickPasteColumns));
     m_settings.setValue(kSettingsPreviewLines, m_previewLineCount);
+    m_settings.setValue(kSettingsSearchMode, searchModeToString(m_searchMode));
+    m_settings.setValue(kSettingsRegexStrict, m_regexStrictFullScan);
     m_settings.sync();
 }
 
@@ -354,6 +375,10 @@ void AppController::applyViewSettings() {
     m_quickPasteDialog.setVisibleColumns(m_quickPasteColumns);
     m_mainWindow.setPreviewLineCount(m_previewLineCount);
     m_quickPasteDialog.setPreviewLineCount(m_previewLineCount);
+    m_mainWindow.setSearchMode(m_searchMode);
+    m_quickPasteDialog.setSearchMode(m_searchMode);
+    m_mainWindow.setRegexStrict(m_regexStrictFullScan);
+    m_quickPasteDialog.setRegexStrict(m_regexStrictFullScan);
 }
 
 QVector<bool> AppController::parseColumns(const QString &text,

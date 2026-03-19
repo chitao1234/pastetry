@@ -11,6 +11,9 @@ class RepositoryTests : public QObject {
 private slots:
     void insertAndReadBack();
     void searchPaginationAtScale();
+    void regexSearchValidationAndResults();
+    void regexStrictModeFindsOlderMatches();
+    void advancedSearchFiltersAndErrors();
 };
 
 void RepositoryTests::insertAndReadBack() {
@@ -70,18 +73,170 @@ void RepositoryTests::searchPaginationAtScale() {
         QVERIFY2(id > 0, qPrintable(error));
     }
 
-    SearchResult page = repo.searchEntries("token1", 0, 200, &error);
+    SearchRequest request;
+    request.mode = SearchMode::Plain;
+    request.query = "token1";
+    request.cursor = 0;
+    request.limit = 200;
+
+    SearchResult page = repo.searchEntries(request, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(!page.entries.isEmpty());
     QVERIFY(page.nextCursor >= 0);
 
-    SearchResult next = repo.searchEntries("token1", page.nextCursor, 200, &error);
+    request.cursor = page.nextCursor;
+    SearchResult next = repo.searchEntries(request, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(!next.entries.isEmpty());
 
     for (const auto &entry : page.entries) {
         QVERIFY(entry.preview.contains("token1"));
     }
+}
+
+void RepositoryTests::regexSearchValidationAndResults() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-regex");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry entry;
+    entry.sourceApp = "regex";
+    entry.preview = "hello world from pastetry";
+    entry.formats = {CapturedFormat{"text/plain", entry.preview.toUtf8()}};
+    QVERIFY2(repo.insertEntry(entry, &error) > 0, qPrintable(error));
+
+    SearchRequest validRequest;
+    validRequest.mode = SearchMode::Regex;
+    validRequest.query = "hello\\s+world";
+    validRequest.limit = 50;
+
+    SearchResult valid = repo.searchEntries(validRequest, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(valid.queryValid);
+    QCOMPARE(valid.entries.size(), 1);
+    QVERIFY(valid.entries.at(0).preview.contains("hello world"));
+
+    SearchRequest invalidRequest = validRequest;
+    invalidRequest.query = "([a-z";
+    SearchResult invalid = repo.searchEntries(invalidRequest, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!invalid.queryValid);
+    QVERIFY(!invalid.queryError.isEmpty());
+    QVERIFY(invalid.entries.isEmpty());
+}
+
+void RepositoryTests::regexStrictModeFindsOlderMatches() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-regex-strict");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry oldEntry;
+    oldEntry.sourceApp = "generator";
+    oldEntry.preview = "needle_old_record";
+    oldEntry.formats = {CapturedFormat{"text/plain", oldEntry.preview.toUtf8()}};
+    QVERIFY2(repo.insertEntry(oldEntry, &error) > 0, qPrintable(error));
+
+    for (int i = 0; i < 5200; ++i) {
+        CapturedEntry entry;
+        entry.sourceApp = "generator";
+        entry.preview = QString("recent entry %1").arg(i);
+        entry.formats = {CapturedFormat{"text/plain", entry.preview.toUtf8()}};
+        QVERIFY2(repo.insertEntry(entry, &error) > 0, qPrintable(error));
+    }
+
+    SearchRequest bounded;
+    bounded.mode = SearchMode::Regex;
+    bounded.query = "needle_old_record";
+    bounded.limit = 20;
+    bounded.regexStrict = false;
+
+    SearchResult boundedResult = repo.searchEntries(bounded, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(boundedResult.queryValid);
+    QVERIFY(boundedResult.entries.isEmpty());
+
+    SearchRequest strict = bounded;
+    strict.regexStrict = true;
+    SearchResult strictResult = repo.searchEntries(strict, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(strictResult.queryValid);
+    QCOMPARE(strictResult.entries.size(), 1);
+    QCOMPARE(strictResult.entries.first().preview, QString("needle_old_record"));
+}
+
+void RepositoryTests::advancedSearchFiltersAndErrors() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-advanced");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry codeEntry;
+    codeEntry.sourceApp = "Code";
+    codeEntry.sourceWindow = "Editor";
+    codeEntry.preview = "alpha beta";
+    codeEntry.formats = {
+        CapturedFormat{"text/plain", QByteArray("alpha beta")},
+        CapturedFormat{"text/html", QByteArray("<b>alpha beta</b>")},
+    };
+    const qint64 codeId = repo.insertEntry(codeEntry, &error);
+    QVERIFY2(codeId > 0, qPrintable(error));
+
+    CapturedEntry termEntry;
+    termEntry.sourceApp = "Terminal";
+    termEntry.sourceWindow = "Term";
+    termEntry.preview = "gamma delta";
+    termEntry.formats = {
+        CapturedFormat{"text/plain", QByteArray("gamma delta")},
+    };
+    const qint64 terminalId = repo.insertEntry(termEntry, &error);
+    QVERIFY2(terminalId > 0, qPrintable(error));
+    QVERIFY2(repo.setPinned(terminalId, true, &error), qPrintable(error));
+
+    SearchRequest filterRequest;
+    filterRequest.mode = SearchMode::Advanced;
+    filterRequest.query = "app:code AND mime:html AND beta";
+    filterRequest.limit = 20;
+    SearchResult filtered = repo.searchEntries(filterRequest, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(filtered.queryValid);
+    QCOMPARE(filtered.entries.size(), 1);
+    QCOMPARE(filtered.entries.first().id, codeId);
+
+    SearchRequest pinnedRequest;
+    pinnedRequest.mode = SearchMode::Advanced;
+    pinnedRequest.query = "pinned:true AND app:terminal";
+    pinnedRequest.limit = 20;
+    SearchResult pinnedResult = repo.searchEntries(pinnedRequest, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(pinnedResult.queryValid);
+    QCOMPARE(pinnedResult.entries.size(), 1);
+    QCOMPARE(pinnedResult.entries.first().id, terminalId);
+
+    SearchRequest invalidRequest;
+    invalidRequest.mode = SearchMode::Advanced;
+    invalidRequest.query = "app:";
+    invalidRequest.limit = 20;
+    SearchResult invalid = repo.searchEntries(invalidRequest, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(!invalid.queryValid);
+    QVERIFY(!invalid.queryError.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(RepositoryTests)

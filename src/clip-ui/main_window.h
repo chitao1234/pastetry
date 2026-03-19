@@ -12,6 +12,8 @@ class QPoint;
 class QPushButton;
 class QTableView;
 class QTimer;
+class QLabel;
+class QToolButton;
 
 namespace pastetry {
 
@@ -26,10 +28,14 @@ public:
     void setCloseToTrayEnabled(bool enabled);
     void setVisibleColumns(const QVector<bool> &visibleColumns);
     void setPreviewLineCount(int lineCount);
+    void setSearchMode(SearchMode mode);
+    SearchMode searchMode() const;
+    void setRegexStrict(bool enabled);
 
 signals:
     void closeToTrayRequested();
     void visibleColumnsChanged(const QVector<bool> &visibleColumns);
+    void searchModeChanged(const QString &mode);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -46,10 +52,16 @@ private:
     qint64 selectedEntryId() const;
     void applyTableLayout();
     void showHeaderContextMenu(const QPoint &position);
+    void setSearchError(const QString &message);
+    void applySearchModeButtons();
 
     IpcClient m_client;
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
+    QToolButton *m_plainModeButton = nullptr;
+    QToolButton *m_regexModeButton = nullptr;
+    QToolButton *m_advancedModeButton = nullptr;
+    QLabel *m_searchErrorLabel = nullptr;
     QTableView *m_table = nullptr;
     PreviewTextDelegate *m_previewDelegate = nullptr;
     QPushButton *m_loadMoreButton = nullptr;
@@ -63,6 +75,8 @@ private:
     bool m_closeToTrayEnabled = true;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;
+    SearchMode m_searchMode = SearchMode::Plain;
+    bool m_regexStrict = false;
 };
 
 }  // namespace pastetry

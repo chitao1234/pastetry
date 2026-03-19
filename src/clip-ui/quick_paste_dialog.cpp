@@ -10,11 +10,14 @@
 #include <QHeaderView>
 #include <QHideEvent>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
+#include <QToolButton>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 
 namespace pastetry {
@@ -49,8 +52,34 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     resize(760, 420);
 
     auto *layout = new QVBoxLayout(this);
+    auto *searchRow = new QHBoxLayout();
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(QStringLiteral("Type to search clipboard history..."));
+    auto *modeWidget = new QWidget(this);
+    auto *modeLayout = new QHBoxLayout(modeWidget);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(2);
+
+    m_plainModeButton = new QToolButton(modeWidget);
+    m_plainModeButton->setText(QStringLiteral("Plain"));
+    m_plainModeButton->setCheckable(true);
+    m_plainModeButton->setAutoExclusive(true);
+    m_regexModeButton = new QToolButton(modeWidget);
+    m_regexModeButton->setText(QStringLiteral("Regex"));
+    m_regexModeButton->setCheckable(true);
+    m_regexModeButton->setAutoExclusive(true);
+    m_advancedModeButton = new QToolButton(modeWidget);
+    m_advancedModeButton->setText(QStringLiteral("Advanced"));
+    m_advancedModeButton->setCheckable(true);
+    m_advancedModeButton->setAutoExclusive(true);
+
+    modeLayout->addWidget(m_plainModeButton);
+    modeLayout->addWidget(m_regexModeButton);
+    modeLayout->addWidget(m_advancedModeButton);
+
+    m_searchErrorLabel = new QLabel(this);
+    m_searchErrorLabel->setStyleSheet(QStringLiteral("color: #b3412f;"));
+    m_searchErrorLabel->setVisible(false);
 
     m_table = new QTableView(this);
     m_model = new HistoryModel(this);
@@ -74,7 +103,10 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
                                                       QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
-    layout->addWidget(m_searchEdit);
+    searchRow->addWidget(m_searchEdit, 1);
+    searchRow->addWidget(modeWidget);
+    layout->addLayout(searchRow);
+    layout->addWidget(m_searchErrorLabel);
     layout->addWidget(m_table);
 
     m_searchTimer = new QTimer(this);
@@ -99,7 +131,20 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
             [this] { activateCurrent(); });
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &QuickPasteDialog::showHeaderContextMenu);
+    connect(m_plainModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Plain);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
+    connect(m_regexModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Regex);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
+    connect(m_advancedModeButton, &QToolButton::clicked, this, [this] {
+        setSearchMode(SearchMode::Advanced);
+        emit searchModeChanged(searchModeToString(m_searchMode));
+    });
 
+    applySearchModeButtons();
     applyTableLayout();
 }
 
@@ -115,6 +160,31 @@ void QuickPasteDialog::setVisibleColumns(const QVector<bool> &visibleColumns) {
 void QuickPasteDialog::setPreviewLineCount(int lineCount) {
     m_previewLineCount = qBound(1, lineCount, 12);
     applyTableLayout();
+}
+
+void QuickPasteDialog::setSearchMode(SearchMode mode) {
+    if (m_searchMode == mode) {
+        return;
+    }
+    m_searchMode = mode;
+    applySearchModeButtons();
+    if (isVisible()) {
+        refreshResults();
+    }
+}
+
+SearchMode QuickPasteDialog::searchMode() const {
+    return m_searchMode;
+}
+
+void QuickPasteDialog::setRegexStrict(bool enabled) {
+    if (m_regexStrict == enabled) {
+        return;
+    }
+    m_regexStrict = enabled;
+    if (isVisible() && m_searchMode == SearchMode::Regex) {
+        refreshResults();
+    }
 }
 
 void QuickPasteDialog::openPopup() {
@@ -185,6 +255,8 @@ void QuickPasteDialog::refreshResults() {
     params.insert(QStringLiteral("query"), m_searchEdit->text());
     params.insert(QStringLiteral("cursor"), 0);
     params.insert(QStringLiteral("limit"), 60);
+    params.insert(QStringLiteral("mode"), searchModeToString(m_searchMode));
+    params.insert(QStringLiteral("regex_strict"), m_regexStrict);
 
     const QCborMap result = m_client.request(QStringLiteral("SearchEntries"), params,
                                              2500, &error);
@@ -192,6 +264,16 @@ void QuickPasteDialog::refreshResults() {
         emit errorOccurred(error);
         return;
     }
+
+    const bool queryValid =
+        !result.contains(QStringLiteral("query_valid")) ||
+        result.value(QStringLiteral("query_valid")).toBool();
+    const QString queryError = result.value(QStringLiteral("query_error")).toString();
+    if (!queryValid) {
+        setSearchError(queryError);
+        return;
+    }
+    setSearchError(QString());
 
     QVector<EntrySummary> entries =
         parseSummaries(result.value(QStringLiteral("entries")).toArray());
@@ -246,6 +328,22 @@ void QuickPasteDialog::applyTableLayout() {
     const int rowHeight =
         m_previewDelegate->sizeHint(option, previewIndex).height();
     m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
+}
+
+void QuickPasteDialog::setSearchError(const QString &message) {
+    const QString trimmed = message.trimmed();
+    m_searchErrorLabel->setVisible(!trimmed.isEmpty());
+    m_searchErrorLabel->setText(trimmed);
+}
+
+void QuickPasteDialog::applySearchModeButtons() {
+    if (!m_plainModeButton || !m_regexModeButton || !m_advancedModeButton) {
+        return;
+    }
+
+    m_plainModeButton->setChecked(m_searchMode == SearchMode::Plain);
+    m_regexModeButton->setChecked(m_searchMode == SearchMode::Regex);
+    m_advancedModeButton->setChecked(m_searchMode == SearchMode::Advanced);
 }
 
 void QuickPasteDialog::showHeaderContextMenu(const QPoint &position) {

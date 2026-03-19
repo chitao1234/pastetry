@@ -62,6 +62,8 @@ private:
     QVector<bool> m_historyColumns = {true, true, true, true};
     QVector<bool> m_quickPasteColumns = {true, true, true, true};
     int m_previewLineCount = 2;
+    SearchMode m_searchMode = SearchMode::Plain;
+    bool m_regexStrictFullScan = false;
     ShortcutRegistrationState m_shortcutState = ShortcutRegistrationState::Disabled;
 
     QSystemTrayIcon *m_trayIcon = nullptr;

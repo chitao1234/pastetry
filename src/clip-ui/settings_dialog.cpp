@@ -92,11 +92,14 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     m_previewLines = new QSpinBox(this);
     m_previewLines->setMinimum(1);
     m_previewLines->setMaximum(12);
+    m_regexStrictFullScan =
+        new QCheckBox(QStringLiteral("Regex strict mode scans full history"), this);
 
     form->addRow(QStringLiteral("Global shortcut"), shortcutRow);
     form->addRow(QStringLiteral("Shortcut status"), m_shortcutStatus);
     form->addRow(QStringLiteral("Visible columns"), columnsWidget);
     form->addRow(QStringLiteral("Preview lines"), m_previewLines);
+    form->addRow(QStringLiteral("Search"), m_regexStrictFullScan);
     form->addRow(QString(), m_startToTray);
 
     auto *buttons = new QDialogButtonBox(
@@ -122,7 +125,8 @@ void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
                                const QString &shortcutStatusText,
                                const QVector<bool> &historyColumns,
                                const QVector<bool> &quickPasteColumns,
-                               int previewLineCount) {
+                               int previewLineCount,
+                               bool regexStrictFullScan) {
     m_shortcutEdit->setKeySequence(shortcut);
     m_startToTray->setChecked(startToTray);
     setShortcutStatusText(shortcutStatusText);
@@ -138,6 +142,7 @@ void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
     }
 
     m_previewLines->setValue(qBound(1, previewLineCount, 12));
+    m_regexStrictFullScan->setChecked(regexStrictFullScan);
 }
 
 void SettingsDialog::setShortcutStatusText(const QString &shortcutStatusText) {
@@ -171,6 +176,10 @@ QVector<bool> SettingsDialog::quickPasteColumns() const {
 
 int SettingsDialog::previewLineCount() const {
     return m_previewLines->value();
+}
+
+bool SettingsDialog::regexStrictFullScanEnabled() const {
+    return m_regexStrictFullScan->isChecked();
 }
 
 }  // namespace pastetry

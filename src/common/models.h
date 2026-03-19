@@ -45,9 +45,48 @@ struct EntryDetail {
     QVector<FormatDescriptor> formats;
 };
 
+enum class SearchMode {
+    Plain = 0,
+    Regex = 1,
+    Advanced = 2,
+};
+
+inline QString searchModeToString(SearchMode mode) {
+    switch (mode) {
+        case SearchMode::Regex:
+            return QStringLiteral("regex");
+        case SearchMode::Advanced:
+            return QStringLiteral("advanced");
+        case SearchMode::Plain:
+        default:
+            return QStringLiteral("plain");
+    }
+}
+
+inline SearchMode searchModeFromString(const QString &modeText) {
+    const QString normalized = modeText.trimmed().toLower();
+    if (normalized == QStringLiteral("regex")) {
+        return SearchMode::Regex;
+    }
+    if (normalized == QStringLiteral("advanced")) {
+        return SearchMode::Advanced;
+    }
+    return SearchMode::Plain;
+}
+
+struct SearchRequest {
+    SearchMode mode = SearchMode::Plain;
+    QString query;
+    int cursor = 0;
+    int limit = 100;
+    bool regexStrict = false;
+};
+
 struct SearchResult {
     QVector<EntrySummary> entries;
     int nextCursor = -1;
+    bool queryValid = true;
+    QString queryError;
 };
 
 }  // namespace pastetry

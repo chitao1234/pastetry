@@ -1,11 +1,774 @@
 #include "common/clipboard_repository.h"
 
 #include <QDateTime>
+#include <QRegularExpression>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QVariant>
 
 namespace pastetry {
+namespace {
+
+constexpr int kMaxSearchLimit = 500;
+constexpr int kRegexBatchSize = 400;
+constexpr int kRegexBoundedRowLimit = 4000;
+
+const QString kSummaryColumns = QStringLiteral(
+    "e.id, e.created_at_ms, e.preview, e.source_app, e.pinned, "
+    "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count, "
+    "(SELECT ef2.blob_hash FROM entry_formats ef2 "
+    "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
+    "AS image_blob_hash ");
+
+enum class QueryTokenType {
+    Word,
+    Quoted,
+    LParen,
+    RParen,
+};
+
+struct QueryToken {
+    QueryTokenType type = QueryTokenType::Word;
+    QString text;
+    int position = 0;
+};
+
+struct SqlExpr {
+    QString sql;
+    QVariantList bindValues;
+};
+
+bool isOperatorWord(const QueryToken &token, const QString &op) {
+    return token.type == QueryTokenType::Word &&
+           token.text.compare(op, Qt::CaseInsensitive) == 0;
+}
+
+bool canStartPrimary(const QueryToken &token) {
+    if (token.type == QueryTokenType::LParen || token.type == QueryTokenType::Quoted) {
+        return true;
+    }
+    if (token.type == QueryTokenType::Word) {
+        return !isOperatorWord(token, QStringLiteral("AND")) &&
+               !isOperatorWord(token, QStringLiteral("OR"));
+    }
+    return false;
+}
+
+QStringList extractSearchTerms(const QString &text) {
+    static const QRegularExpression tokenRe(QStringLiteral("([\\p{L}\\p{N}_-]+)"));
+
+    QStringList terms;
+    const auto matches = tokenRe.globalMatch(text);
+    for (auto it = matches; it.hasNext();) {
+        const auto match = it.next();
+        const QString token = match.captured(1).trimmed();
+        if (!token.isEmpty()) {
+            terms.push_back(token);
+        }
+    }
+    return terms;
+}
+
+QString buildPrefixFtsQuery(const QString &text) {
+    const QStringList terms = extractSearchTerms(text);
+    if (terms.isEmpty()) {
+        return {};
+    }
+
+    QStringList parts;
+    parts.reserve(terms.size());
+    for (const QString &term : terms) {
+        parts.push_back(term + QStringLiteral("*"));
+    }
+    return parts.join(QChar(' '));
+}
+
+QString escapeLike(const QString &value) {
+    QString escaped = value;
+    escaped.replace('\\', QStringLiteral("\\\\"));
+    escaped.replace('%', QStringLiteral("\\%"));
+    escaped.replace('_', QStringLiteral("\\_"));
+    return escaped;
+}
+
+bool parsePinnedValue(const QString &text, bool *value) {
+    const QString normalized = text.trimmed().toLower();
+    if (normalized == QStringLiteral("1") || normalized == QStringLiteral("true") ||
+        normalized == QStringLiteral("yes") || normalized == QStringLiteral("on")) {
+        *value = true;
+        return true;
+    }
+    if (normalized == QStringLiteral("0") || normalized == QStringLiteral("false") ||
+        normalized == QStringLiteral("no") || normalized == QStringLiteral("off")) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
+bool parseDateFilterValue(const QString &text, bool isBefore, qint64 *valueMs,
+                          QString *error) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("Date value cannot be empty");
+        }
+        return false;
+    }
+
+    const bool dateOnly = !trimmed.contains(QChar('T')) && !trimmed.contains(QChar(' '));
+    const QDate date = QDate::fromString(trimmed, Qt::ISODate);
+    if (dateOnly && date.isValid()) {
+        const QTime time = isBefore ? QTime(23, 59, 59, 999) : QTime(0, 0, 0, 0);
+        const QDateTime dt(date, time, Qt::LocalTime);
+        *valueMs = dt.toMSecsSinceEpoch();
+        return true;
+    }
+
+    QDateTime dt = QDateTime::fromString(trimmed, Qt::ISODateWithMs);
+    if (!dt.isValid()) {
+        dt = QDateTime::fromString(trimmed, Qt::ISODate);
+    }
+    if (!dt.isValid()) {
+        if (error) {
+            *error = QStringLiteral("Invalid date/time '%1' (use ISO-8601)")
+                         .arg(trimmed);
+        }
+        return false;
+    }
+
+    *valueMs = dt.toMSecsSinceEpoch();
+    return true;
+}
+
+EntrySummary readSummary(const QSqlQuery &query) {
+    EntrySummary summary;
+    summary.id = query.value(0).toLongLong();
+    summary.createdAtMs = query.value(1).toLongLong();
+    summary.preview = query.value(2).toString();
+    summary.sourceApp = query.value(3).toString();
+    summary.pinned = query.value(4).toInt() == 1;
+    summary.formatCount = query.value(5).toInt();
+    summary.imageBlobHash = query.value(6).toString();
+    return summary;
+}
+
+SearchResult runPagedSummaryQuery(const QSqlDatabase &db, const QString &sql,
+                                  const QVariantList &bindValues, int safeCursor,
+                                  int safeLimit, QString *error) {
+    SearchResult result;
+
+    QSqlQuery query(db);
+    query.prepare(sql);
+    for (const QVariant &value : bindValues) {
+        query.addBindValue(value);
+    }
+    query.addBindValue(safeLimit + 1);
+    query.addBindValue(safeCursor);
+
+    if (!query.exec()) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return result;
+    }
+
+    while (query.next()) {
+        result.entries.push_back(readSummary(query));
+    }
+
+    if (result.entries.size() > safeLimit) {
+        result.entries.removeLast();
+        result.nextCursor = safeCursor + safeLimit;
+    }
+
+    return result;
+}
+
+QVector<EntrySummary> loadSummariesByIds(const QSqlDatabase &db, const QVector<qint64> &ids,
+                                         QString *error) {
+    QVector<EntrySummary> summaries;
+    if (ids.isEmpty()) {
+        return summaries;
+    }
+
+    QStringList placeholders;
+    placeholders.reserve(ids.size());
+    for (int i = 0; i < ids.size(); ++i) {
+        placeholders.push_back(QStringLiteral("?"));
+    }
+
+    const QString sql = QStringLiteral(
+                            "SELECT %1 "
+                            "FROM entries e "
+                            "WHERE e.id IN (%2)")
+                            .arg(kSummaryColumns, placeholders.join(','));
+
+    QSqlQuery query(db);
+    query.prepare(sql);
+    for (qint64 id : ids) {
+        query.addBindValue(id);
+    }
+
+    if (!query.exec()) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return {};
+    }
+
+    QHash<qint64, EntrySummary> byId;
+    while (query.next()) {
+        EntrySummary summary = readSummary(query);
+        byId.insert(summary.id, std::move(summary));
+    }
+
+    summaries.reserve(ids.size());
+    for (qint64 id : ids) {
+        const auto it = byId.find(id);
+        if (it != byId.end()) {
+            summaries.push_back(it.value());
+        }
+    }
+    return summaries;
+}
+
+bool tokenizeAdvancedQuery(const QString &queryText, QVector<QueryToken> *tokens,
+                           QString *error) {
+    tokens->clear();
+
+    int i = 0;
+    while (i < queryText.size()) {
+        while (i < queryText.size() && queryText.at(i).isSpace()) {
+            ++i;
+        }
+        if (i >= queryText.size()) {
+            break;
+        }
+
+        const QChar ch = queryText.at(i);
+        if (ch == QChar('(')) {
+            tokens->push_back({QueryTokenType::LParen, QStringLiteral("("), i});
+            ++i;
+            continue;
+        }
+        if (ch == QChar(')')) {
+            tokens->push_back({QueryTokenType::RParen, QStringLiteral(")"), i});
+            ++i;
+            continue;
+        }
+
+        if (ch == QChar('"')) {
+            const int start = i;
+            ++i;
+            QString text;
+            bool escaped = false;
+            bool closed = false;
+            while (i < queryText.size()) {
+                const QChar current = queryText.at(i);
+                if (escaped) {
+                    text.append(current);
+                    escaped = false;
+                } else if (current == QChar('\\')) {
+                    escaped = true;
+                } else if (current == QChar('"')) {
+                    closed = true;
+                    ++i;
+                    break;
+                } else {
+                    text.append(current);
+                }
+                ++i;
+            }
+
+            if (!closed) {
+                if (error) {
+                    *error = QStringLiteral("Unterminated quoted string");
+                }
+                return false;
+            }
+
+            tokens->push_back({QueryTokenType::Quoted, text, start});
+            continue;
+        }
+
+        const int start = i;
+        while (i < queryText.size()) {
+            const QChar c = queryText.at(i);
+            if (c.isSpace() || c == QChar('(') || c == QChar(')') || c == QChar('"')) {
+                break;
+            }
+            ++i;
+        }
+        tokens->push_back({QueryTokenType::Word, queryText.mid(start, i - start), start});
+    }
+
+    return true;
+}
+
+SqlExpr combineExpr(const QString &op, SqlExpr left, SqlExpr right) {
+    SqlExpr combined;
+    combined.sql = QStringLiteral("(%1 %2 %3)").arg(left.sql, op, right.sql);
+    combined.bindValues = std::move(left.bindValues);
+    combined.bindValues.append(right.bindValues);
+    return combined;
+}
+
+class AdvancedQueryParser {
+public:
+    explicit AdvancedQueryParser(QVector<QueryToken> tokens)
+        : m_tokens(std::move(tokens)) {}
+
+    bool parse(SqlExpr *out, QString *error) {
+        if (m_tokens.isEmpty()) {
+            if (error) {
+                *error = QStringLiteral("Advanced query is empty");
+            }
+            return false;
+        }
+
+        if (!parseOr(out, error)) {
+            return false;
+        }
+        if (!atEnd()) {
+            if (error) {
+                *error = QStringLiteral("Unexpected token '%1'")
+                             .arg(peek()->text);
+            }
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool parseOr(SqlExpr *out, QString *error) {
+        if (!parseAnd(out, error)) {
+            return false;
+        }
+        while (matchKeyword(QStringLiteral("OR"))) {
+            SqlExpr rhs;
+            if (!parseAnd(&rhs, error)) {
+                return false;
+            }
+            *out = combineExpr(QStringLiteral("OR"), std::move(*out), std::move(rhs));
+        }
+        return true;
+    }
+
+    bool parseAnd(SqlExpr *out, QString *error) {
+        if (!parseUnary(out, error)) {
+            return false;
+        }
+
+        while (!atEnd()) {
+            if (matchKeyword(QStringLiteral("AND"))) {
+                SqlExpr rhs;
+                if (!parseUnary(&rhs, error)) {
+                    return false;
+                }
+                *out = combineExpr(QStringLiteral("AND"), std::move(*out), std::move(rhs));
+                continue;
+            }
+
+            const QueryToken *token = peek();
+            if (!token || token->type == QueryTokenType::RParen ||
+                isOperatorWord(*token, QStringLiteral("OR"))) {
+                break;
+            }
+            if (!canStartPrimary(*token)) {
+                break;
+            }
+
+            SqlExpr rhs;
+            if (!parseUnary(&rhs, error)) {
+                return false;
+            }
+            *out = combineExpr(QStringLiteral("AND"), std::move(*out), std::move(rhs));
+        }
+        return true;
+    }
+
+    bool parseUnary(SqlExpr *out, QString *error) {
+        if (matchKeyword(QStringLiteral("NOT"))) {
+            SqlExpr inner;
+            if (!parseUnary(&inner, error)) {
+                return false;
+            }
+            out->sql = QStringLiteral("(NOT %1)").arg(inner.sql);
+            out->bindValues = std::move(inner.bindValues);
+            return true;
+        }
+        return parsePrimary(out, error);
+    }
+
+    bool parsePrimary(SqlExpr *out, QString *error) {
+        const QueryToken *token = peek();
+        if (!token) {
+            if (error) {
+                *error = QStringLiteral("Unexpected end of advanced query");
+            }
+            return false;
+        }
+
+        if (token->type == QueryTokenType::LParen) {
+            ++m_index;
+            if (!parseOr(out, error)) {
+                return false;
+            }
+            if (atEnd() || peek()->type != QueryTokenType::RParen) {
+                if (error) {
+                    *error = QStringLiteral("Expected ')'");
+                }
+                return false;
+            }
+            ++m_index;
+            return true;
+        }
+
+        return parseTerm(out, error);
+    }
+
+    bool parseTerm(SqlExpr *out, QString *error) {
+        if (atEnd()) {
+            if (error) {
+                *error = QStringLiteral("Expected term");
+            }
+            return false;
+        }
+
+        const QueryToken token = m_tokens.at(m_index++);
+        if (token.type == QueryTokenType::RParen) {
+            if (error) {
+                *error = QStringLiteral("Unexpected ')'");
+            }
+            return false;
+        }
+
+        if (token.type == QueryTokenType::Word &&
+            (isOperatorWord(token, QStringLiteral("AND")) ||
+             isOperatorWord(token, QStringLiteral("OR")) ||
+             isOperatorWord(token, QStringLiteral("NOT")))) {
+            if (error) {
+                *error = QStringLiteral("Unexpected operator '%1'").arg(token.text);
+            }
+            return false;
+        }
+
+        if (token.type == QueryTokenType::Word) {
+            const int colon = token.text.indexOf(QChar(':'));
+            if (colon > 0) {
+                const QString field = token.text.left(colon).trimmed().toLower();
+                QString value = token.text.mid(colon + 1);
+                if (value.isEmpty()) {
+                    if (atEnd()) {
+                        if (error) {
+                            *error = QStringLiteral("Field '%1' requires a value")
+                                         .arg(field);
+                        }
+                        return false;
+                    }
+                    const QueryToken nextToken = m_tokens.at(m_index++);
+                    if (nextToken.type == QueryTokenType::LParen ||
+                        nextToken.type == QueryTokenType::RParen ||
+                        (nextToken.type == QueryTokenType::Word &&
+                         (isOperatorWord(nextToken, QStringLiteral("AND")) ||
+                          isOperatorWord(nextToken, QStringLiteral("OR")) ||
+                          isOperatorWord(nextToken, QStringLiteral("NOT"))))) {
+                        if (error) {
+                            *error = QStringLiteral("Field '%1' requires a value")
+                                         .arg(field);
+                        }
+                        return false;
+                    }
+                    value = nextToken.text;
+                }
+                return compileField(field, value, out, error);
+            }
+        }
+
+        return compileText(token.text, out, error);
+    }
+
+    bool compileText(const QString &text, SqlExpr *out, QString *error) {
+        const QString ftsQuery = buildPrefixFtsQuery(text);
+        if (ftsQuery.isEmpty()) {
+            if (error) {
+                *error = QStringLiteral("No searchable text in '%1'").arg(text);
+            }
+            return false;
+        }
+
+        out->sql = QStringLiteral(
+            "e.id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)");
+        out->bindValues = {ftsQuery};
+        return true;
+    }
+
+    bool compileField(const QString &field, const QString &rawValue, SqlExpr *out,
+                      QString *error) {
+        const QString value = rawValue.trimmed();
+        if (value.isEmpty()) {
+            if (error) {
+                *error = QStringLiteral("Field '%1' requires a value").arg(field);
+            }
+            return false;
+        }
+
+        if (field == QStringLiteral("app")) {
+            out->sql = QStringLiteral("LOWER(e.source_app) LIKE ? ESCAPE '\\'");
+            out->bindValues = {QStringLiteral("%") + escapeLike(value.toLower()) +
+                               QStringLiteral("%")};
+            return true;
+        }
+
+        if (field == QStringLiteral("window")) {
+            out->sql = QStringLiteral("LOWER(e.source_window) LIKE ? ESCAPE '\\'");
+            out->bindValues = {QStringLiteral("%") + escapeLike(value.toLower()) +
+                               QStringLiteral("%")};
+            return true;
+        }
+
+        if (field == QStringLiteral("mime")) {
+            out->sql = QStringLiteral(
+                "EXISTS (SELECT 1 FROM entry_formats ef "
+                "WHERE ef.entry_id = e.id AND LOWER(ef.mime_type) LIKE ? ESCAPE '\\')");
+            out->bindValues = {QStringLiteral("%") + escapeLike(value.toLower()) +
+                               QStringLiteral("%")};
+            return true;
+        }
+
+        if (field == QStringLiteral("pinned")) {
+            bool pinned = false;
+            if (!parsePinnedValue(value, &pinned)) {
+                if (error) {
+                    *error = QStringLiteral("Invalid pinned value '%1' (use true/false)")
+                                 .arg(value);
+                }
+                return false;
+            }
+            out->sql = QStringLiteral("e.pinned = ?");
+            out->bindValues = {pinned ? 1 : 0};
+            return true;
+        }
+
+        if (field == QStringLiteral("after")) {
+            qint64 valueMs = 0;
+            if (!parseDateFilterValue(value, false, &valueMs, error)) {
+                return false;
+            }
+            out->sql = QStringLiteral("e.created_at_ms >= ?");
+            out->bindValues = {valueMs};
+            return true;
+        }
+
+        if (field == QStringLiteral("before")) {
+            qint64 valueMs = 0;
+            if (!parseDateFilterValue(value, true, &valueMs, error)) {
+                return false;
+            }
+            out->sql = QStringLiteral("e.created_at_ms <= ?");
+            out->bindValues = {valueMs};
+            return true;
+        }
+
+        if (error) {
+            *error = QStringLiteral("Unknown advanced field '%1'").arg(field);
+        }
+        return false;
+    }
+
+    bool matchKeyword(const QString &word) {
+        const QueryToken *token = peek();
+        if (!token || !isOperatorWord(*token, word)) {
+            return false;
+        }
+        ++m_index;
+        return true;
+    }
+
+    bool atEnd() const {
+        return m_index >= m_tokens.size();
+    }
+
+    const QueryToken *peek() const {
+        if (atEnd()) {
+            return nullptr;
+        }
+        return &m_tokens.at(m_index);
+    }
+
+    QVector<QueryToken> m_tokens;
+    int m_index = 0;
+};
+
+SearchResult runRegexSearch(const QSqlDatabase &db, const SearchRequest &request, int safeCursor,
+                            int safeLimit, QString *error) {
+    SearchResult result;
+    const QString pattern = request.query.trimmed();
+    if (pattern.isEmpty()) {
+        return runPagedSummaryQuery(
+            db,
+            QStringLiteral("SELECT %1 FROM entries e "
+                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "LIMIT ? OFFSET ?")
+                .arg(kSummaryColumns),
+            {}, safeCursor, safeLimit, error);
+    }
+
+    QRegularExpression regex(pattern);
+    if (!regex.isValid()) {
+        result.queryValid = false;
+        result.queryError = QStringLiteral("Regex error at offset %1: %2")
+                                .arg(regex.patternErrorOffset())
+                                .arg(regex.errorString());
+        return result;
+    }
+
+    QVector<qint64> pageIds;
+    pageIds.reserve(safeLimit + 1);
+
+    const int boundedLimit = request.regexStrict ? -1 : kRegexBoundedRowLimit;
+    const int targetMatchCount = safeCursor + safeLimit + 1;
+
+    int rowOffset = 0;
+    int matchCount = 0;
+    bool stop = false;
+
+    while (!stop) {
+        int rowsToRead = kRegexBatchSize;
+        if (boundedLimit >= 0) {
+            rowsToRead = qMin(rowsToRead, boundedLimit - rowOffset);
+            if (rowsToRead <= 0) {
+                break;
+            }
+        }
+
+        QSqlQuery scan(db);
+        scan.prepare(
+            QStringLiteral("SELECT e.id, e.preview "
+                           "FROM entries e "
+                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "LIMIT ? OFFSET ?"));
+        scan.addBindValue(rowsToRead);
+        scan.addBindValue(rowOffset);
+
+        if (!scan.exec()) {
+            if (error) {
+                *error = scan.lastError().text();
+            }
+            return result;
+        }
+
+        int rowsRead = 0;
+        while (scan.next()) {
+            ++rowsRead;
+            const qint64 id = scan.value(0).toLongLong();
+            const QString preview = scan.value(1).toString();
+
+            if (!regex.match(preview).hasMatch()) {
+                continue;
+            }
+
+            if (matchCount >= safeCursor && pageIds.size() < safeLimit + 1) {
+                pageIds.push_back(id);
+            }
+            ++matchCount;
+            if (matchCount >= targetMatchCount) {
+                stop = true;
+                break;
+            }
+        }
+
+        rowOffset += rowsRead;
+        if (rowsRead < rowsToRead) {
+            break;
+        }
+    }
+
+    if (pageIds.size() > safeLimit) {
+        pageIds.removeLast();
+        result.nextCursor = safeCursor + safeLimit;
+    }
+
+    result.entries = loadSummariesByIds(db, pageIds, error);
+    return result;
+}
+
+SearchResult runPlainSearch(const QSqlDatabase &db, const SearchRequest &request, int safeCursor,
+                            int safeLimit, QString *error) {
+    const QString trimmed = request.query.trimmed();
+    if (trimmed.isEmpty()) {
+        return runPagedSummaryQuery(
+            db,
+            QStringLiteral("SELECT %1 FROM entries e "
+                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "LIMIT ? OFFSET ?")
+                .arg(kSummaryColumns),
+            {}, safeCursor, safeLimit, error);
+    }
+
+    const QString ftsQuery = buildPrefixFtsQuery(trimmed);
+    SearchResult result;
+    if (ftsQuery.isEmpty()) {
+        result.queryValid = false;
+        result.queryError = QStringLiteral("Query has no searchable terms");
+        return result;
+    }
+
+    return runPagedSummaryQuery(
+        db,
+        QStringLiteral("SELECT %1 "
+                       "FROM entries_fts f "
+                       "JOIN entries e ON e.id = f.rowid "
+                       "WHERE entries_fts MATCH ? "
+                       "ORDER BY e.pinned DESC, bm25(entries_fts), e.created_at_ms DESC "
+                       "LIMIT ? OFFSET ?")
+            .arg(kSummaryColumns),
+        {ftsQuery}, safeCursor, safeLimit, error);
+}
+
+SearchResult runAdvancedSearch(const QSqlDatabase &db, const SearchRequest &request,
+                               int safeCursor, int safeLimit, QString *error) {
+    const QString trimmed = request.query.trimmed();
+    if (trimmed.isEmpty()) {
+        return runPagedSummaryQuery(
+            db,
+            QStringLiteral("SELECT %1 FROM entries e "
+                           "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                           "LIMIT ? OFFSET ?")
+                .arg(kSummaryColumns),
+            {}, safeCursor, safeLimit, error);
+    }
+
+    QVector<QueryToken> tokens;
+    SearchResult result;
+    QString parseError;
+    if (!tokenizeAdvancedQuery(trimmed, &tokens, &parseError)) {
+        result.queryValid = false;
+        result.queryError = parseError;
+        return result;
+    }
+
+    AdvancedQueryParser parser(std::move(tokens));
+    SqlExpr expr;
+    if (!parser.parse(&expr, &parseError)) {
+        result.queryValid = false;
+        result.queryError = parseError;
+        return result;
+    }
+
+    return runPagedSummaryQuery(
+        db,
+        QStringLiteral("SELECT %1 "
+                       "FROM entries e "
+                       "WHERE %2 "
+                       "ORDER BY e.pinned DESC, e.created_at_ms DESC "
+                       "LIMIT ? OFFSET ?")
+            .arg(kSummaryColumns, expr.sql),
+        expr.bindValues, safeCursor, safeLimit, error);
+}
+
+}  // namespace
 
 ClipboardRepository::ClipboardRepository(QString dbPath, QString blobDir,
                                          QString connectionName)
@@ -168,69 +931,20 @@ qint64 ClipboardRepository::insertEntry(const CapturedEntry &entry, QString *err
     return entryId;
 }
 
-SearchResult ClipboardRepository::searchEntries(const QString &query, int cursor, int limit,
+SearchResult ClipboardRepository::searchEntries(const SearchRequest &request,
                                                 QString *error) const {
-    SearchResult result;
+    const int safeLimit = qBound(1, request.limit, kMaxSearchLimit);
+    const int safeCursor = qMax(0, request.cursor);
 
-    const int safeLimit = qBound(1, limit, 500);
-    const int safeCursor = qMax(0, cursor);
-
-    QSqlQuery select(m_db);
-
-    if (query.trimmed().isEmpty()) {
-        select.prepare(
-            "SELECT e.id, e.created_at_ms, e.preview, e.source_app, e.pinned, "
-            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count, "
-            "(SELECT ef2.blob_hash FROM entry_formats ef2 "
-            "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
-            "AS image_blob_hash "
-            "FROM entries e "
-            "ORDER BY e.pinned DESC, e.created_at_ms DESC "
-            "LIMIT ? OFFSET ?");
-        select.addBindValue(safeLimit + 1);
-        select.addBindValue(safeCursor);
-    } else {
-        select.prepare(
-            "SELECT e.id, e.created_at_ms, e.preview, e.source_app, e.pinned, "
-            "(SELECT COUNT(*) FROM entry_formats ef WHERE ef.entry_id = e.id) AS format_count, "
-            "(SELECT ef2.blob_hash FROM entry_formats ef2 "
-            "WHERE ef2.entry_id = e.id AND ef2.mime_type LIKE 'image/%' LIMIT 1) "
-            "AS image_blob_hash "
-            "FROM entries_fts f "
-            "JOIN entries e ON e.id = f.rowid "
-            "WHERE entries_fts MATCH ? "
-            "ORDER BY e.pinned DESC, bm25(entries_fts), e.created_at_ms DESC "
-            "LIMIT ? OFFSET ?");
-        select.addBindValue(query + "*");
-        select.addBindValue(safeLimit + 1);
-        select.addBindValue(safeCursor);
+    switch (request.mode) {
+        case SearchMode::Regex:
+            return runRegexSearch(m_db, request, safeCursor, safeLimit, error);
+        case SearchMode::Advanced:
+            return runAdvancedSearch(m_db, request, safeCursor, safeLimit, error);
+        case SearchMode::Plain:
+        default:
+            return runPlainSearch(m_db, request, safeCursor, safeLimit, error);
     }
-
-    if (!select.exec()) {
-        if (error) {
-            *error = select.lastError().text();
-        }
-        return result;
-    }
-
-    while (select.next()) {
-        EntrySummary summary;
-        summary.id = select.value(0).toLongLong();
-        summary.createdAtMs = select.value(1).toLongLong();
-        summary.preview = select.value(2).toString();
-        summary.sourceApp = select.value(3).toString();
-        summary.pinned = select.value(4).toInt() == 1;
-        summary.formatCount = select.value(5).toInt();
-        summary.imageBlobHash = select.value(6).toString();
-        result.entries.push_back(summary);
-    }
-
-    if (result.entries.size() > safeLimit) {
-        result.entries.removeLast();
-        result.nextCursor = safeCursor + safeLimit;
-    }
-
-    return result;
 }
 
 EntryDetail ClipboardRepository::getEntryDetail(qint64 entryId, QString *error) const {

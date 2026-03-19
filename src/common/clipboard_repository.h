@@ -16,8 +16,7 @@ public:
     bool initialize(QString *error);
 
     qint64 insertEntry(const CapturedEntry &entry, QString *error);
-    SearchResult searchEntries(const QString &query, int cursor, int limit,
-                               QString *error) const;
+    SearchResult searchEntries(const SearchRequest &request, QString *error) const;
     EntryDetail getEntryDetail(qint64 entryId, QString *error) const;
     QByteArray loadBlob(const QString &hash, QString *error) const;
     bool setPinned(qint64 entryId, bool pinned, QString *error);
