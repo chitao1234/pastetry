@@ -1473,24 +1473,66 @@ bool ClipboardRepository::deleteEntry(qint64 entryId, QString *error) {
 }
 
 bool ClipboardRepository::clearHistory(bool keepPinned, QString *error) {
-    QSqlQuery query(m_db);
-    if (!query.exec(keepPinned ? "SELECT id FROM entries WHERE pinned = 0"
-                               : "SELECT id FROM entries")) {
+    if (!m_db.transaction()) {
         if (error) {
-            *error = query.lastError().text();
+            *error = m_db.lastError().text();
         }
         return false;
     }
 
-    QVector<qint64> ids;
-    while (query.next()) {
-        ids.push_back(query.value(0).toLongLong());
+    QSqlQuery blobRefs(m_db);
+    const QString blobRefSql =
+        keepPinned
+            ? QStringLiteral("SELECT ef.blob_hash, COUNT(*) "
+                             "FROM entry_formats ef "
+                             "JOIN entries e ON e.id = ef.entry_id "
+                             "WHERE e.pinned = 0 "
+                             "GROUP BY ef.blob_hash")
+            : QStringLiteral("SELECT blob_hash, COUNT(*) "
+                             "FROM entry_formats "
+                             "GROUP BY blob_hash");
+    if (!blobRefs.exec(blobRefSql)) {
+        m_db.rollback();
+        if (error) {
+            *error = blobRefs.lastError().text();
+        }
+        return false;
     }
 
-    for (const auto id : ids) {
-        if (!deleteEntry(id, error)) {
+    struct BlobRefCount {
+        QString hash;
+        int count = 0;
+    };
+    QVector<BlobRefCount> releasePlan;
+    while (blobRefs.next()) {
+        BlobRefCount item;
+        item.hash = blobRefs.value(0).toString();
+        item.count = blobRefs.value(1).toInt();
+        releasePlan.push_back(item);
+    }
+
+    QSqlQuery delEntries(m_db);
+    if (!delEntries.exec(keepPinned ? "DELETE FROM entries WHERE pinned = 0"
+                                    : "DELETE FROM entries")) {
+        m_db.rollback();
+        if (error) {
+            *error = delEntries.lastError().text();
+        }
+        return false;
+    }
+
+    for (const BlobRefCount &item : releasePlan) {
+        if (!m_blobStore.releaseBlobRefs(m_db, item.hash, item.count, error)) {
+            m_db.rollback();
             return false;
         }
+    }
+
+    if (!m_db.commit()) {
+        if (error) {
+            *error = m_db.lastError().text();
+        }
+        return false;
     }
 
     return true;

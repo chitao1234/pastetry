@@ -373,6 +373,7 @@ void QuickPasteDialog::startPendingSearch() {
                         result.value(QStringLiteral("query_error")).toString();
                     if (!queryValid) {
                         setSearchError(queryError);
+                        m_model->resetData({}, -1);
                     } else {
                         setSearchError(QString());
 

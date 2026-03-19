@@ -291,6 +291,41 @@ bool qtKeyToWindowsVk(int qtKey, UINT *outVk) {
     }
 
     switch (qtKey) {
+        case Qt::Key_BracketLeft:
+            *outVk = VK_OEM_4;
+            return true;
+        case Qt::Key_BracketRight:
+            *outVk = VK_OEM_6;
+            return true;
+        case Qt::Key_Backslash:
+            *outVk = VK_OEM_5;
+            return true;
+        case Qt::Key_Slash:
+            *outVk = VK_OEM_2;
+            return true;
+        case Qt::Key_Minus:
+            *outVk = VK_OEM_MINUS;
+            return true;
+        case Qt::Key_Equal:
+        case Qt::Key_Plus:
+            *outVk = VK_OEM_PLUS;
+            return true;
+        case Qt::Key_Comma:
+            *outVk = VK_OEM_COMMA;
+            return true;
+        case Qt::Key_Period:
+            *outVk = VK_OEM_PERIOD;
+            return true;
+        case Qt::Key_Semicolon:
+        case Qt::Key_Colon:
+            *outVk = VK_OEM_1;
+            return true;
+        case Qt::Key_Apostrophe:
+            *outVk = VK_OEM_7;
+            return true;
+        case Qt::Key_QuoteLeft:
+            *outVk = VK_OEM_3;
+            return true;
         case Qt::Key_Insert:
             *outVk = VK_INSERT;
             return true;
@@ -357,6 +392,51 @@ bool qtKeyToX11KeySym(int qtKey, KeySym *outSym) {
     }
 
     switch (qtKey) {
+        case Qt::Key_BracketLeft:
+            *outSym = XK_bracketleft;
+            return true;
+        case Qt::Key_BracketRight:
+            *outSym = XK_bracketright;
+            return true;
+        case Qt::Key_Backslash:
+            *outSym = XK_backslash;
+            return true;
+        case Qt::Key_Slash:
+            *outSym = XK_slash;
+            return true;
+        case Qt::Key_Minus:
+            *outSym = XK_minus;
+            return true;
+        case Qt::Key_Equal:
+            *outSym = XK_equal;
+            return true;
+        case Qt::Key_Comma:
+            *outSym = XK_comma;
+            return true;
+        case Qt::Key_Period:
+            *outSym = XK_period;
+            return true;
+        case Qt::Key_Semicolon:
+            *outSym = XK_semicolon;
+            return true;
+        case Qt::Key_Apostrophe:
+            *outSym = XK_apostrophe;
+            return true;
+        case Qt::Key_QuoteLeft:
+            *outSym = XK_grave;
+            return true;
+        case Qt::Key_Plus:
+            *outSym = XK_plus;
+            return true;
+        case Qt::Key_Colon:
+            *outSym = XK_colon;
+            return true;
+        case Qt::Key_Underscore:
+            *outSym = XK_underscore;
+            return true;
+        case Qt::Key_Question:
+            *outSym = XK_question;
+            return true;
         case Qt::Key_Insert:
             *outSym = XK_Insert;
             return true;

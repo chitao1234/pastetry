@@ -113,6 +113,15 @@ QByteArray BlobStore::loadBlob(const QString &hash, QString *error) const {
 }
 
 bool BlobStore::releaseBlob(QSqlDatabase &db, const QString &hash, QString *error) {
+    return releaseBlobRefs(db, hash, 1, error);
+}
+
+bool BlobStore::releaseBlobRefs(QSqlDatabase &db, const QString &hash, int count,
+                                QString *error) {
+    if (count <= 0) {
+        return true;
+    }
+
     QSqlQuery query(db);
     query.prepare("SELECT ref_count, path FROM blobs WHERE hash = ?");
     query.addBindValue(hash);
@@ -130,9 +139,10 @@ bool BlobStore::releaseBlob(QSqlDatabase &db, const QString &hash, QString *erro
     const int refCount = query.value(0).toInt();
     const QString path = query.value(1).toString();
 
-    if (refCount > 1) {
+    if (refCount > count) {
         QSqlQuery dec(db);
-        dec.prepare("UPDATE blobs SET ref_count = ref_count - 1 WHERE hash = ?");
+        dec.prepare("UPDATE blobs SET ref_count = ref_count - ? WHERE hash = ?");
+        dec.addBindValue(count);
         dec.addBindValue(hash);
         if (!dec.exec()) {
             if (error) {
@@ -143,7 +153,14 @@ bool BlobStore::releaseBlob(QSqlDatabase &db, const QString &hash, QString *erro
         return true;
     }
 
-    QFile::remove(path);
+    QFile blobFile(path);
+    if (blobFile.exists() && !blobFile.remove()) {
+        if (error) {
+            *error = QStringLiteral("Failed to remove blob file '%1': %2")
+                         .arg(path, blobFile.errorString());
+        }
+        return false;
+    }
 
     QSqlQuery del(db);
     del.prepare("DELETE FROM blobs WHERE hash = ?");

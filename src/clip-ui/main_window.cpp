@@ -422,6 +422,9 @@ void MainWindow::startPendingSearch() {
                         result.value(QStringLiteral("query_error")).toString();
                     if (!queryValid) {
                         setSearchError(queryError);
+                        m_model->resetData({}, -1);
+                        m_cursor = -1;
+                        updatePinnedReorderEnabled();
                         statusBar()->showMessage(QStringLiteral("Invalid query"), 2500);
                     } else {
                         setSearchError(QString());

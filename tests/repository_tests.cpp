@@ -17,6 +17,7 @@ private slots:
     void advancedSearchFiltersAndErrors();
     void preservesFormatInsertionOrder();
     void persistsCapturePolicy();
+    void clearHistoryKeepsPinnedWhenRequested();
     void pinnedOrderMoveAndRepin();
     void resolvesRecentNonPinnedSlots();
 };
@@ -365,6 +366,67 @@ void RepositoryTests::persistsCapturePolicy() {
     QVERIFY2(repo.loadCapturePolicy(&loadedEmptyAllowlist, &error), qPrintable(error));
     QVERIFY(loadedEmptyAllowlist.customAllowlistPatterns.isEmpty());
     QCOMPARE(loadedEmptyAllowlist.profile, emptyAllowlistPolicy.profile);
+}
+
+void RepositoryTests::clearHistoryKeepsPinnedWhenRequested() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-clear-history");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry keepEntry;
+    keepEntry.sourceApp = QStringLiteral("clear-test");
+    keepEntry.preview = QStringLiteral("keep-me");
+    keepEntry.formats = {CapturedFormat{"text/plain", QByteArray("keep-me")}};
+    const qint64 keepId = repo.insertEntry(keepEntry, &error);
+    QVERIFY2(keepId > 0, qPrintable(error));
+    QVERIFY2(repo.setPinned(keepId, true, &error), qPrintable(error));
+
+    CapturedEntry dropA;
+    dropA.sourceApp = QStringLiteral("clear-test");
+    dropA.preview = QStringLiteral("drop-a");
+    dropA.formats = {CapturedFormat{"text/plain", QByteArray("drop-a")}};
+    const qint64 dropAId = repo.insertEntry(dropA, &error);
+    QVERIFY2(dropAId > 0, qPrintable(error));
+
+    CapturedEntry dropB;
+    dropB.sourceApp = QStringLiteral("clear-test");
+    dropB.preview = QStringLiteral("drop-b");
+    dropB.formats = {CapturedFormat{"text/plain", QByteArray("drop-a")}};
+    const qint64 dropBId = repo.insertEntry(dropB, &error);
+    QVERIFY2(dropBId > 0, qPrintable(error));
+
+    QVERIFY2(repo.clearHistory(true, &error), qPrintable(error));
+
+    SearchRequest afterKeepPinned;
+    afterKeepPinned.mode = SearchMode::Plain;
+    afterKeepPinned.query = QString();
+    afterKeepPinned.limit = 20;
+    SearchResult keepPinnedResult = repo.searchEntries(afterKeepPinned, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(keepPinnedResult.entries.size(), 1);
+    QCOMPARE(keepPinnedResult.entries.first().id, keepId);
+    QVERIFY(keepPinnedResult.entries.first().pinned);
+
+    EntryDetail missingDrop = repo.getEntryDetail(dropAId, &error);
+    QCOMPARE(missingDrop.id, qint64(0));
+    QVERIFY(!error.isEmpty());
+
+    error.clear();
+    missingDrop = repo.getEntryDetail(dropBId, &error);
+    QCOMPARE(missingDrop.id, qint64(0));
+    QVERIFY(!error.isEmpty());
+
+    error.clear();
+    QVERIFY2(repo.clearHistory(false, &error), qPrintable(error));
+    SearchResult emptyResult = repo.searchEntries(afterKeepPinned, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(emptyResult.entries.isEmpty());
 }
 
 void RepositoryTests::pinnedOrderMoveAndRepin() {

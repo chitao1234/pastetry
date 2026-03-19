@@ -13,6 +13,7 @@ public:
     QString putBlob(QSqlDatabase &db, const QByteArray &bytes, QString *error);
     QByteArray loadBlob(const QString &hash, QString *error) const;
     bool releaseBlob(QSqlDatabase &db, const QString &hash, QString *error);
+    bool releaseBlobRefs(QSqlDatabase &db, const QString &hash, int count, QString *error);
 
 private:
     QString pathForHash(const QString &hash) const;
