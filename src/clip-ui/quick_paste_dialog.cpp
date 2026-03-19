@@ -105,6 +105,8 @@ QuickPasteDialog::QuickPasteDialog(IpcAsyncRunner *ipcRunner, QWidget *parent)
     : QDialog(parent), m_ipcRunner(ipcRunner) {
     setWindowTitle(QStringLiteral("Quick Paste"));
     setWindowFlag(Qt::Tool, true);
+    setSizeGripEnabled(true);
+    setMinimumSize(460, 280);
     resize(760, 420);
 
     auto *layout = new QVBoxLayout(this);

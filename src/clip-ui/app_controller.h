@@ -9,6 +9,7 @@
 
 #include <QObject>
 #include <QSettings>
+#include <QSize>
 #include <QTimer>
 #include <QVector>
 
@@ -93,6 +94,7 @@ private:
 
     bool m_startToTray = true;
     QByteArray m_popupGeometry;
+    QSize m_quickPasteSize;
     QVector<bool> m_historyColumns = {true, true, true, true};
     QVector<bool> m_quickPasteColumns = {true, true, true, true};
     int m_previewLineCount = 2;

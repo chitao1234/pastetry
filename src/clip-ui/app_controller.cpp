@@ -48,6 +48,7 @@ constexpr const char *kSettingsActionsPrefix = "hotkey/actions_v2";
 constexpr const char *kSettingsAutoPasteKey = "hotkey/auto_paste_key";
 constexpr const char *kSettingsStartToTray = "ui/start_to_tray";
 constexpr const char *kSettingsPopupGeometry = "popup/last_geometry";
+constexpr const char *kSettingsQuickPasteSize = "popup/size";
 constexpr const char *kSettingsHistoryColumns = "ui/history_columns";
 constexpr const char *kSettingsQuickColumns = "ui/quick_paste_columns";
 constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
@@ -509,8 +510,11 @@ AppController::AppController(AppPaths paths, QObject *parent)
             });
 
     connect(&m_quickPasteDialog, &QuickPasteDialog::popupHidden, this, [this] {
-        m_popupGeometry = m_quickPasteDialog.saveGeometry();
-        saveSettings();
+        const QSize popupSize = m_quickPasteDialog.size();
+        if (popupSize.isValid() && popupSize != m_quickPasteSize) {
+            m_quickPasteSize = popupSize;
+            saveSettings();
+        }
     });
 
     connect(&m_mainWindow, &MainWindow::visibleColumnsChanged, this,
@@ -548,6 +552,10 @@ AppController::AppController(AppPaths paths, QObject *parent)
 
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
         m_isQuitting = true;
+        const QSize popupSize = m_quickPasteDialog.size();
+        if (popupSize.isValid()) {
+            m_quickPasteSize = popupSize;
+        }
         m_mainWindow.setCloseToTrayEnabled(false);
         clearChordCaptureRegistrations();
         clearShortcutRegistrations();
@@ -632,9 +640,12 @@ bool AppController::initialize(QString *error) {
     }
 
     loadSettings();
-    if (!m_popupGeometry.isEmpty()) {
+    if (m_quickPasteSize.isValid()) {
+        m_quickPasteDialog.resize(m_quickPasteSize);
+    } else if (!m_popupGeometry.isEmpty()) {
         m_quickPasteDialog.restoreGeometry(m_popupGeometry);
     }
+    m_quickPasteSize = m_quickPasteDialog.size();
     applyViewSettings();
 
     setupTray();
@@ -1331,6 +1342,11 @@ void AppController::loadSettings() {
     }
 
     m_popupGeometry = m_settings.value(kSettingsPopupGeometry).toByteArray();
+    if (m_settings.contains(kSettingsQuickPasteSize)) {
+        m_quickPasteSize = m_settings.value(kSettingsQuickPasteSize).toSize();
+    } else {
+        m_quickPasteSize = QSize();
+    }
     m_historyColumns = parseColumns(m_settings.value(kSettingsHistoryColumns).toString(),
                                     m_historyColumns);
     m_quickPasteColumns = parseColumns(m_settings.value(kSettingsQuickColumns).toString(),
@@ -1396,6 +1412,9 @@ void AppController::saveSettings() {
                           : QString());
 
     setValueIfChanged(QString::fromUtf8(kSettingsPopupGeometry), m_popupGeometry);
+    if (m_quickPasteSize.isValid()) {
+        setValueIfChanged(QString::fromUtf8(kSettingsQuickPasteSize), m_quickPasteSize);
+    }
     setValueIfChanged(QString::fromUtf8(kSettingsHistoryColumns),
                       serializeColumns(m_historyColumns));
     setValueIfChanged(QString::fromUtf8(kSettingsQuickColumns),
