@@ -336,7 +336,8 @@ UINT qtModsToWindows(Qt::KeyboardModifiers modifiers) {
 
 }  // namespace
 
-GlobalShortcutService::GlobalShortcutService(QObject *parent) : QObject(parent) {}
+GlobalShortcutService::GlobalShortcutService(QObject *parent, int windowsHotkeyId)
+    : QObject(parent), m_hotkeyId(windowsHotkeyId) {}
 
 GlobalShortcutService::~GlobalShortcutService() {
     unregisterShortcut();

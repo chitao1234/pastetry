@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QCborArray>
 #include <QCborMap>
+#include <QHash>
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -20,6 +21,9 @@ namespace pastetry {
 namespace {
 
 constexpr const char *kSettingsShortcut = "hotkey/sequence";
+constexpr const char *kSettingsQuickPasteShortcut = "hotkey/quick_paste";
+constexpr const char *kSettingsOpenHistoryShortcut = "hotkey/open_history";
+constexpr const char *kSettingsOpenInspectorShortcut = "hotkey/open_inspector";
 constexpr const char *kSettingsStartToTray = "ui/start_to_tray";
 constexpr const char *kSettingsPopupGeometry = "popup/last_geometry";
 constexpr const char *kSettingsHistoryColumns = "ui/history_columns";
@@ -53,6 +57,14 @@ QString shortcutStatusTextForState(const QKeySequence &shortcut,
     }
 }
 
+QString shortcutConflictStatusText(const QString &otherActionLabel) {
+    return QStringLiteral("Conflict: also assigned to %1").arg(otherActionLabel);
+}
+
+QString shortcutKey(const QKeySequence &shortcut) {
+    return shortcut.toString(QKeySequence::PortableText).trimmed();
+}
+
 }  // namespace
 
 AppController::AppController(AppPaths paths, QObject *parent)
@@ -61,12 +73,19 @@ AppController::AppController(AppPaths paths, QObject *parent)
       m_client(m_paths.socketName),
       m_mainWindow(m_client),
       m_quickPasteDialog(m_client),
+      m_quickPasteShortcutService(this, 1),
+      m_openHistoryShortcutService(this, 2),
+      m_openInspectorShortcutService(this, 3),
       m_settings(QStringLiteral("pastetry"), QStringLiteral("pastetry")),
       m_singleInstanceName(QStringLiteral("pastetry.clip-ui.instance.v1")) {
     m_mainWindow.setCloseToTrayEnabled(true);
 
-    connect(&m_shortcutService, &GlobalShortcutService::activated, this,
+    connect(&m_quickPasteShortcutService, &GlobalShortcutService::activated, this,
             &AppController::showQuickPastePopup);
+    connect(&m_openHistoryShortcutService, &GlobalShortcutService::activated, this,
+            &AppController::showMainWindow);
+    connect(&m_openInspectorShortcutService, &GlobalShortcutService::activated, this,
+            &AppController::openClipboardInspector);
 
     connect(&m_quickPasteDialog, &QuickPasteDialog::entryActivated, this, [this] {
         if (m_trayIcon && m_trayIcon->isVisible()) {
@@ -121,7 +140,9 @@ AppController::AppController(AppPaths paths, QObject *parent)
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
         m_isQuitting = true;
         m_mainWindow.setCloseToTrayEnabled(false);
-        m_shortcutService.unregisterShortcut();
+        m_quickPasteShortcutService.unregisterShortcut();
+        m_openHistoryShortcutService.unregisterShortcut();
+        m_openInspectorShortcutService.unregisterShortcut();
         saveSettings();
     });
 
@@ -148,7 +169,7 @@ bool AppController::initialize(QString *error) {
     setupTray();
     m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
                                        m_trayIcon->isVisible());
-    applyShortcutSetting();
+    applyShortcutSettings();
     checkDaemonConnectivity(true);
     QString capturePolicyError;
     if (!loadCapturePolicyFromDaemon(&capturePolicyError) &&
@@ -245,26 +266,112 @@ void AppController::openSettings() {
     }
 
     SettingsDialog dialog(&m_mainWindow);
-    dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
-                     m_historyColumns, m_quickPasteColumns, m_previewLineCount,
-                     m_regexStrictFullScan, m_capturePolicy);
+    auto currentQuickPasteStatus = [&]() {
+        return shortcutStatusTextForState(
+            m_quickPasteShortcut, m_quickPasteShortcutState,
+            m_quickPasteShortcutService.lastError(), true);
+    };
+    auto currentOpenHistoryStatus = [&]() {
+        return shortcutStatusTextForState(
+            m_openHistoryShortcut, m_openHistoryShortcutState,
+            m_openHistoryShortcutService.lastError(), true);
+    };
+    auto currentOpenInspectorStatus = [&]() {
+        return shortcutStatusTextForState(
+            m_openInspectorShortcut, m_openInspectorShortcutState,
+            m_openInspectorShortcutService.lastError(), true);
+    };
 
-    GlobalShortcutService probeShortcutService(&dialog);
-    auto updateShortcutAvailability = [&](const QKeySequence &candidateShortcut) {
-        ShortcutRegistrationState state = ShortcutRegistrationState::Disabled;
-        QString detail;
-        const bool currentShortcut = (candidateShortcut == m_shortcut);
-        if (currentShortcut) {
-            state = m_shortcutState;
-            detail = m_shortcutService.lastError();
-        } else {
-            state = probeShortcutService.registerShortcut(candidateShortcut);
-            detail = probeShortcutService.lastError();
-            probeShortcutService.unregisterShortcut();
+    dialog.setValues(
+        m_quickPasteShortcut, m_openHistoryShortcut, m_openInspectorShortcut,
+        m_startToTray, currentQuickPasteStatus(), currentOpenHistoryStatus(),
+        currentOpenInspectorStatus(), m_historyColumns, m_quickPasteColumns,
+        m_previewLineCount, m_regexStrictFullScan, m_capturePolicy);
+
+    GlobalShortcutService probeShortcutService(&dialog, 99);
+    auto updateShortcutAvailability = [&]() {
+        struct ShortcutAvailabilityInput {
+            QString actionLabel;
+            QKeySequence candidateSequence;
+            QKeySequence activeSequence;
+            ShortcutRegistrationState activeState = ShortcutRegistrationState::Disabled;
+            QString activeError;
+            QString statusText;
+            int conflictWith = -1;
+        };
+
+        QVector<ShortcutAvailabilityInput> inputs = {
+            {QStringLiteral("Quick paste popup"), dialog.quickPasteShortcut(),
+             m_quickPasteShortcut, m_quickPasteShortcutState,
+             m_quickPasteShortcutService.lastError()},
+            {QStringLiteral("Open history window"), dialog.openHistoryShortcut(),
+             m_openHistoryShortcut, m_openHistoryShortcutState,
+             m_openHistoryShortcutService.lastError()},
+            {QStringLiteral("Open clipboard inspector"), dialog.openInspectorShortcut(),
+             m_openInspectorShortcut, m_openInspectorShortcutState,
+             m_openInspectorShortcutService.lastError()},
+        };
+
+        QHash<QString, QVector<int>> shortcutUsage;
+        for (int i = 0; i < inputs.size(); ++i) {
+            const QString key = shortcutKey(inputs[i].candidateSequence);
+            if (!key.isEmpty()) {
+                shortcutUsage[key].push_back(i);
+            }
         }
 
-        dialog.setShortcutStatusText(shortcutStatusTextForState(
-            candidateShortcut, state, detail, currentShortcut));
+        bool hasConflict = false;
+        for (auto it = shortcutUsage.cbegin(); it != shortcutUsage.cend(); ++it) {
+            const QVector<int> usage = it.value();
+            if (usage.size() < 2) {
+                continue;
+            }
+            hasConflict = true;
+            for (int index : usage) {
+                int peerIndex = -1;
+                for (int candidatePeer : usage) {
+                    if (candidatePeer != index) {
+                        peerIndex = candidatePeer;
+                        break;
+                    }
+                }
+                inputs[index].conflictWith = peerIndex;
+            }
+        }
+
+        for (int i = 0; i < inputs.size(); ++i) {
+            ShortcutAvailabilityInput &input = inputs[i];
+            if (input.conflictWith >= 0) {
+                input.statusText = shortcutConflictStatusText(
+                    inputs[input.conflictWith].actionLabel);
+                continue;
+            }
+
+            ShortcutRegistrationState state = ShortcutRegistrationState::Disabled;
+            QString detail;
+            const bool currentShortcut =
+                (input.candidateSequence == input.activeSequence);
+            if (currentShortcut) {
+                state = input.activeState;
+                detail = input.activeError;
+            } else {
+                state = probeShortcutService.registerShortcut(input.candidateSequence);
+                detail = probeShortcutService.lastError();
+                probeShortcutService.unregisterShortcut();
+            }
+
+            input.statusText = shortcutStatusTextForState(
+                input.candidateSequence, state, detail, currentShortcut);
+        }
+
+        dialog.setShortcutStatusTexts(inputs[0].statusText, inputs[1].statusText,
+                                      inputs[2].statusText);
+        dialog.setShortcutConflictState(
+            hasConflict,
+            hasConflict
+                ? QStringLiteral(
+                      "Duplicate shortcuts are not allowed for Pastetry actions.")
+                : QString());
     };
 
     auto applyFromDialog = [&]() {
@@ -280,7 +387,9 @@ void AppController::openSettings() {
             return;
         }
 
-        m_shortcut = dialog.shortcut();
+        m_quickPasteShortcut = dialog.quickPasteShortcut();
+        m_openHistoryShortcut = dialog.openHistoryShortcut();
+        m_openInspectorShortcut = dialog.openInspectorShortcut();
         m_startToTray = dialog.startToTray();
         m_historyColumns = normalizedColumns(dialog.historyColumns());
         m_quickPasteColumns = normalizedColumns(dialog.quickPasteColumns());
@@ -291,16 +400,20 @@ void AppController::openSettings() {
                                            m_trayIcon->isVisible());
 
         applyViewSettings();
-        applyShortcutSetting();
+        applyShortcutSettings();
         saveSettings();
-        dialog.setValues(m_shortcut, m_startToTray, shortcutStatusText(),
-                         m_historyColumns, m_quickPasteColumns, m_previewLineCount,
-                         m_regexStrictFullScan, m_capturePolicy);
+        dialog.setValues(
+            m_quickPasteShortcut, m_openHistoryShortcut, m_openInspectorShortcut,
+            m_startToTray, currentQuickPasteStatus(), currentOpenHistoryStatus(),
+            currentOpenInspectorStatus(), m_historyColumns, m_quickPasteColumns,
+            m_previewLineCount, m_regexStrictFullScan, m_capturePolicy);
+        updateShortcutAvailability();
     };
 
     connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
-    connect(&dialog, &SettingsDialog::shortcutEdited, &dialog, updateShortcutAvailability);
-    updateShortcutAvailability(dialog.shortcut());
+    connect(&dialog, &SettingsDialog::shortcutsEdited, &dialog,
+            updateShortcutAvailability);
+    updateShortcutAvailability();
 
     if (dialog.exec() == QDialog::Accepted) {
         applyFromDialog();
@@ -367,9 +480,16 @@ void AppController::handleSingleInstanceCommand(const QString &command) {
 void AppController::loadSettings() {
     m_startToTray = m_settings.value(kSettingsStartToTray, true).toBool();
 
-    const QString sequence =
-        m_settings.value(kSettingsShortcut, QString()).toString();
-    m_shortcut = QKeySequence::fromString(sequence);
+    const QString quickPasteSequence = m_settings.contains(kSettingsQuickPasteShortcut)
+                                           ? m_settings.value(kSettingsQuickPasteShortcut)
+                                                 .toString()
+                                           : m_settings.value(kSettingsShortcut, QString())
+                                                 .toString();
+    m_quickPasteShortcut = QKeySequence::fromString(quickPasteSequence);
+    m_openHistoryShortcut = QKeySequence::fromString(
+        m_settings.value(kSettingsOpenHistoryShortcut, QString()).toString());
+    m_openInspectorShortcut = QKeySequence::fromString(
+        m_settings.value(kSettingsOpenInspectorShortcut, QString()).toString());
 
     m_popupGeometry = m_settings.value(kSettingsPopupGeometry).toByteArray();
     m_historyColumns = parseColumns(m_settings.value(kSettingsHistoryColumns).toString(),
@@ -387,7 +507,10 @@ void AppController::loadSettings() {
 
 void AppController::saveSettings() {
     m_settings.setValue(kSettingsStartToTray, m_startToTray);
-    m_settings.setValue(kSettingsShortcut, m_shortcut.toString());
+    m_settings.setValue(kSettingsShortcut, m_quickPasteShortcut.toString());
+    m_settings.setValue(kSettingsQuickPasteShortcut, m_quickPasteShortcut.toString());
+    m_settings.setValue(kSettingsOpenHistoryShortcut, m_openHistoryShortcut.toString());
+    m_settings.setValue(kSettingsOpenInspectorShortcut, m_openInspectorShortcut.toString());
     m_settings.setValue(kSettingsPopupGeometry, m_popupGeometry);
     m_settings.setValue(kSettingsHistoryColumns, serializeColumns(m_historyColumns));
     m_settings.setValue(kSettingsQuickColumns, serializeColumns(m_quickPasteColumns));
@@ -397,15 +520,42 @@ void AppController::saveSettings() {
     m_settings.sync();
 }
 
-void AppController::applyShortcutSetting() {
-    m_shortcutState = m_shortcutService.registerShortcut(m_shortcut);
+void AppController::applyShortcutSettings() {
+    struct ShortcutRegistration {
+        QString actionLabel;
+        QKeySequence sequence;
+        GlobalShortcutService *service = nullptr;
+        ShortcutRegistrationState *state = nullptr;
+    };
 
-    if (m_shortcutState == ShortcutRegistrationState::Failed ||
-        m_shortcutState == ShortcutRegistrationState::Unavailable) {
-        if (m_trayIcon && m_trayIcon->isVisible()) {
-            m_trayIcon->showMessage(QStringLiteral("Pastetry shortcut"),
-                                    shortcutStatusText(),
-                                    QSystemTrayIcon::Warning, 2500);
+    QVector<ShortcutRegistration> registrations = {
+        {QStringLiteral("Quick paste popup"), m_quickPasteShortcut,
+         &m_quickPasteShortcutService, &m_quickPasteShortcutState},
+        {QStringLiteral("Open history window"), m_openHistoryShortcut,
+         &m_openHistoryShortcutService, &m_openHistoryShortcutState},
+        {QStringLiteral("Open clipboard inspector"), m_openInspectorShortcut,
+         &m_openInspectorShortcutService, &m_openInspectorShortcutState},
+    };
+
+    for (auto &registration : registrations) {
+        if (!registration.service || !registration.state) {
+            continue;
+        }
+
+        *registration.state = registration.service->registerShortcut(
+            registration.sequence);
+        if (*registration.state == ShortcutRegistrationState::Failed ||
+            *registration.state == ShortcutRegistrationState::Unavailable) {
+            if (m_trayIcon && m_trayIcon->isVisible()) {
+                m_trayIcon->showMessage(
+                    QStringLiteral("Pastetry shortcut"),
+                    QStringLiteral("%1: %2")
+                        .arg(registration.actionLabel,
+                             shortcutStatusTextForState(
+                                 registration.sequence, *registration.state,
+                                 registration.service->lastError(), true)),
+                    QSystemTrayIcon::Warning, 3000);
+            }
         }
     }
 }
@@ -599,11 +749,6 @@ QVector<bool> AppController::normalizedColumns(const QVector<bool> &columns) con
     }
 
     return normalized;
-}
-
-QString AppController::shortcutStatusText() const {
-    return shortcutStatusTextForState(m_shortcut, m_shortcutState,
-                                      m_shortcutService.lastError(), true);
 }
 
 }  // namespace pastetry

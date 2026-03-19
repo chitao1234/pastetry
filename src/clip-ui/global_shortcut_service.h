@@ -18,7 +18,7 @@ class GlobalShortcutService : public QObject, public QAbstractNativeEventFilter 
     Q_OBJECT
 
 public:
-    explicit GlobalShortcutService(QObject *parent = nullptr);
+    explicit GlobalShortcutService(QObject *parent = nullptr, int windowsHotkeyId = 1);
     ~GlobalShortcutService() override;
 
     ShortcutRegistrationState registerShortcut(const QKeySequence &sequence);
@@ -44,9 +44,9 @@ private:
     bool m_filterInstalled = false;
 
 #ifdef Q_OS_WIN
-    int m_hotkeyId = 1;
     bool m_windowsRegistered = false;
 #endif
+    int m_hotkeyId = 1;
 
 #if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
     unsigned int m_x11Modifiers = 0;

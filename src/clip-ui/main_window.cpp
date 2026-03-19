@@ -13,6 +13,7 @@
 #include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QStyleOptionViewItem>
@@ -190,6 +191,28 @@ MainWindow::MainWindow(IpcClient client, QWidget *parent)
             &MainWindow::showEntryContextMenu);
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &MainWindow::showHeaderContextMenu);
+
+    auto *focusSearchShortcut =
+        new QShortcut(QKeySequence::StandardKey::Find, this);
+    connect(focusSearchShortcut, &QShortcut::activated, this, [this] {
+        m_searchEdit->setFocus();
+        m_searchEdit->selectAll();
+    });
+    auto *refreshShortcut = new QShortcut(QKeySequence(Qt::Key_F5), this);
+    connect(refreshShortcut, &QShortcut::activated, this, [this] { loadInitial(); });
+
+    auto *activateReturnShortcut =
+        new QShortcut(QKeySequence(Qt::Key_Return), m_table);
+    connect(activateReturnShortcut, &QShortcut::activated, this,
+            &MainWindow::activateSelected);
+    auto *activateEnterShortcut = new QShortcut(QKeySequence(Qt::Key_Enter), m_table);
+    connect(activateEnterShortcut, &QShortcut::activated, this,
+            &MainWindow::activateSelected);
+    auto *pinShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_P), m_table);
+    connect(pinShortcut, &QShortcut::activated, this, &MainWindow::pinSelected);
+    auto *deleteShortcut = new QShortcut(QKeySequence::Delete, m_table);
+    connect(deleteShortcut, &QShortcut::activated, this, &MainWindow::deleteSelected);
 
     syncSearchModeCombo();
     applyTableLayout();

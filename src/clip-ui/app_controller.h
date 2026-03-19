@@ -41,7 +41,7 @@ private:
     void setupTray();
     void loadSettings();
     void saveSettings();
-    void applyShortcutSetting();
+    void applyShortcutSettings();
     void applyViewSettings();
     void checkDaemonConnectivity(bool notifyIfUnavailable);
     void notifyDaemonUnavailable(const QString &reason);
@@ -52,16 +52,18 @@ private:
                                const QVector<bool> &fallback) const;
     QString serializeColumns(const QVector<bool> &columns) const;
     QVector<bool> normalizedColumns(const QVector<bool> &columns) const;
-    QString shortcutStatusText() const;
-
     AppPaths m_paths;
     IpcClient m_client;
     MainWindow m_mainWindow;
     QuickPasteDialog m_quickPasteDialog;
-    GlobalShortcutService m_shortcutService;
+    GlobalShortcutService m_quickPasteShortcutService;
+    GlobalShortcutService m_openHistoryShortcutService;
+    GlobalShortcutService m_openInspectorShortcutService;
 
     QSettings m_settings;
-    QKeySequence m_shortcut;
+    QKeySequence m_quickPasteShortcut;
+    QKeySequence m_openHistoryShortcut;
+    QKeySequence m_openInspectorShortcut;
     bool m_startToTray = true;
     QByteArray m_popupGeometry;
     QVector<bool> m_historyColumns = {true, true, true, true};
@@ -70,7 +72,12 @@ private:
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrictFullScan = false;
     CapturePolicy m_capturePolicy;
-    ShortcutRegistrationState m_shortcutState = ShortcutRegistrationState::Disabled;
+    ShortcutRegistrationState m_quickPasteShortcutState =
+        ShortcutRegistrationState::Disabled;
+    ShortcutRegistrationState m_openHistoryShortcutState =
+        ShortcutRegistrationState::Disabled;
+    ShortcutRegistrationState m_openInspectorShortcutState =
+        ShortcutRegistrationState::Disabled;
 
     QSystemTrayIcon *m_trayIcon = nullptr;
     QAction *m_openHistoryAction = nullptr;

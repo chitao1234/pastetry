@@ -22,6 +22,10 @@
 namespace pastetry {
 namespace {
 
+constexpr int kQuickPasteShortcutIndex = 0;
+constexpr int kOpenHistoryShortcutIndex = 1;
+constexpr int kOpenInspectorShortcutIndex = 2;
+
 QString columnLabel(int column) {
     switch (column) {
         case HistoryModel::TimeColumn:
@@ -34,6 +38,19 @@ QString columnLabel(int column) {
             return QStringLiteral("Pinned");
         default:
             return QStringLiteral("Unknown");
+    }
+}
+
+QString globalShortcutActionLabel(int index) {
+    switch (index) {
+        case kQuickPasteShortcutIndex:
+            return QStringLiteral("Quick paste popup");
+        case kOpenHistoryShortcutIndex:
+            return QStringLiteral("Open history window");
+        case kOpenInspectorShortcutIndex:
+            return QStringLiteral("Open clipboard inspector");
+        default:
+            return QStringLiteral("Unknown action");
     }
 }
 
@@ -65,34 +82,63 @@ CaptureProfile captureProfileFromComboIndex(int index) {
 
 SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("Settings"));
-    resize(640, 430);
+    resize(680, 460);
 
     auto *mainLayout = new QVBoxLayout(this);
     auto *tabs = new QTabWidget(this);
     mainLayout->addWidget(tabs, 1);
 
+    auto *shortcutsTab = new QWidget(tabs);
+    auto *shortcutsForm = new QFormLayout(shortcutsTab);
+    shortcutsForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+
+    m_shortcutEdits.resize(kShortcutActionCount);
+    m_shortcutStatusLabels.resize(kShortcutActionCount);
+    for (int index = 0; index < kShortcutActionCount; ++index) {
+        auto *row = new QWidget(shortcutsTab);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+
+        auto *edit = new QKeySequenceEdit(row);
+        edit->setClearButtonEnabled(true);
+        auto *disableButton = new QPushButton(QStringLiteral("Disable"), row);
+
+        rowLayout->addWidget(edit, 1);
+        rowLayout->addWidget(disableButton);
+
+        auto *statusLabel = new QLabel(shortcutsTab);
+        statusLabel->setWordWrap(true);
+
+        m_shortcutEdits[index] = edit;
+        m_shortcutStatusLabels[index] = statusLabel;
+
+        shortcutsForm->addRow(globalShortcutActionLabel(index), row);
+        shortcutsForm->addRow(
+            QStringLiteral("%1 status").arg(globalShortcutActionLabel(index)),
+            statusLabel);
+
+        connect(disableButton, &QPushButton::clicked, this, [edit] { edit->clear(); });
+        connect(edit, &QKeySequenceEdit::keySequenceChanged, this,
+                [this](const QKeySequence &) {
+                    emit shortcutsEdited();
+                    refreshApplyButtonState();
+                });
+    }
+
+    m_shortcutConflictLabel = new QLabel(shortcutsTab);
+    m_shortcutConflictLabel->setWordWrap(true);
+    m_shortcutConflictLabel->setStyleSheet(QStringLiteral("color: #b3412f;"));
+    m_shortcutConflictLabel->setVisible(false);
+    shortcutsForm->addRow(QString(), m_shortcutConflictLabel);
+    shortcutsForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
+                                           QSizePolicy::Expanding));
+    tabs->addTab(shortcutsTab, QStringLiteral("Shortcuts"));
+
     auto *generalTab = new QWidget(tabs);
     auto *generalForm = new QFormLayout(generalTab);
     generalForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
-    auto *shortcutRow = new QWidget(generalTab);
-    auto *shortcutLayout = new QHBoxLayout(shortcutRow);
-    shortcutLayout->setContentsMargins(0, 0, 0, 0);
-
-    m_shortcutEdit = new QKeySequenceEdit(shortcutRow);
-    m_shortcutEdit->setClearButtonEnabled(true);
-    auto *clearButton = new QPushButton(QStringLiteral("Disable"), shortcutRow);
-
-    shortcutLayout->addWidget(m_shortcutEdit, 1);
-    shortcutLayout->addWidget(clearButton);
-
-    m_shortcutStatus = new QLabel(generalTab);
-    m_shortcutStatus->setWordWrap(true);
-
     m_startToTray = new QCheckBox(QStringLiteral("Start minimized to tray"), generalTab);
-
-    generalForm->addRow(QStringLiteral("Global shortcut"), shortcutRow);
-    generalForm->addRow(QStringLiteral("Shortcut status"), m_shortcutStatus);
     generalForm->addRow(QString(), m_startToTray);
     generalForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
                                          QSizePolicy::Expanding));
@@ -201,16 +247,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 
     auto *buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Apply | QDialogButtonBox::Cancel, this);
-
     mainLayout->addWidget(buttons);
 
-    connect(clearButton, &QPushButton::clicked, this, [this] {
-        m_shortcutEdit->clear();
-    });
-    connect(m_shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this,
-            &SettingsDialog::shortcutEdited);
-    connect(m_shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this,
-            [this] { refreshApplyButtonState(); });
     connect(m_startToTray, &QCheckBox::toggled, this,
             [this] { refreshApplyButtonState(); });
     connect(m_previewLines, qOverload<int>(&QSpinBox::valueChanged), this,
@@ -225,6 +263,7 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
             [this](int) { refreshApplyButtonState(); });
     connect(m_customAllowlist, &QPlainTextEdit::textChanged, this,
             [this] { refreshApplyButtonState(); });
+
     for (auto *check : m_historyColumnChecks) {
         connect(check, &QCheckBox::toggled, this,
                 [this] { refreshApplyButtonState(); });
@@ -233,28 +272,45 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
         connect(check, &QCheckBox::toggled, this,
                 [this] { refreshApplyButtonState(); });
     }
+
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     m_applyButton = buttons->button(QDialogButtonBox::Apply);
+    m_okButton = buttons->button(QDialogButtonBox::Ok);
     if (m_applyButton) {
         connect(m_applyButton, &QAbstractButton::clicked, this,
                 &SettingsDialog::applyRequested);
     }
+
     refreshApplyButtonState();
 }
 
-void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
-                               const QString &shortcutStatusText,
+void SettingsDialog::setValues(const QKeySequence &quickPasteShortcut,
+                               const QKeySequence &openHistoryShortcut,
+                               const QKeySequence &openInspectorShortcut,
+                               bool startToTray,
+                               const QString &quickPasteShortcutStatusText,
+                               const QString &openHistoryShortcutStatusText,
+                               const QString &openInspectorShortcutStatusText,
                                const QVector<bool> &historyColumns,
                                const QVector<bool> &quickPasteColumns,
                                int previewLineCount,
                                bool regexStrictFullScan,
                                const CapturePolicy &capturePolicy) {
     m_loadingValues = true;
-    m_shortcutEdit->setKeySequence(shortcut);
+
+    if (m_shortcutEdits.size() == kShortcutActionCount) {
+        m_shortcutEdits[kQuickPasteShortcutIndex]->setKeySequence(quickPasteShortcut);
+        m_shortcutEdits[kOpenHistoryShortcutIndex]->setKeySequence(openHistoryShortcut);
+        m_shortcutEdits[kOpenInspectorShortcutIndex]->setKeySequence(openInspectorShortcut);
+    }
+
     m_startToTray->setChecked(startToTray);
-    setShortcutStatusText(shortcutStatusText);
+    setShortcutStatusTexts(quickPasteShortcutStatusText,
+                           openHistoryShortcutStatusText,
+                           openInspectorShortcutStatusText);
+    setShortcutConflictState(false, QString());
 
     for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
         const bool historyVisible =
@@ -275,23 +331,70 @@ void SettingsDialog::setValues(const QKeySequence &shortcut, bool startToTray,
         qBound(1, static_cast<int>(capturePolicy.maxEntryBytes / (1024 * 1024)), 1024));
     m_customAllowlist->setPlainText(capturePolicy.customAllowlistPatterns.join('\n'));
 
-    m_savedShortcut = shortcut;
+    m_savedShortcuts = globalShortcuts();
     m_savedStartToTray = startToTray;
     m_savedHistoryColumns = columnsFromChecks(m_historyColumnChecks);
     m_savedQuickPasteColumns = columnsFromChecks(m_quickPasteColumnChecks);
     m_savedPreviewLines = m_previewLines->value();
     m_savedRegexStrictFullScan = regexStrictFullScan;
     m_savedCapturePolicy = this->capturePolicy();
+
     m_loadingValues = false;
     refreshApplyButtonState();
 }
 
-void SettingsDialog::setShortcutStatusText(const QString &shortcutStatusText) {
-    m_shortcutStatus->setText(shortcutStatusText);
+void SettingsDialog::setShortcutStatusTexts(
+    const QString &quickPasteShortcutStatusText,
+    const QString &openHistoryShortcutStatusText,
+    const QString &openInspectorShortcutStatusText) {
+    if (m_shortcutStatusLabels.size() != kShortcutActionCount) {
+        return;
+    }
+
+    m_shortcutStatusLabels[kQuickPasteShortcutIndex]->setText(
+        quickPasteShortcutStatusText);
+    m_shortcutStatusLabels[kOpenHistoryShortcutIndex]->setText(
+        openHistoryShortcutStatusText);
+    m_shortcutStatusLabels[kOpenInspectorShortcutIndex]->setText(
+        openInspectorShortcutStatusText);
 }
 
-QKeySequence SettingsDialog::shortcut() const {
-    return m_shortcutEdit->keySequence();
+void SettingsDialog::setShortcutConflictState(bool hasConflict, const QString &message) {
+    m_hasShortcutConflict = hasConflict;
+
+    if (!m_shortcutConflictLabel) {
+        refreshApplyButtonState();
+        return;
+    }
+
+    const QString detail = message.trimmed().isEmpty()
+                               ? QStringLiteral("Shortcut conflict detected")
+                               : message.trimmed();
+    m_shortcutConflictLabel->setVisible(hasConflict);
+    m_shortcutConflictLabel->setText(hasConflict ? detail : QString());
+
+    refreshApplyButtonState();
+}
+
+QKeySequence SettingsDialog::quickPasteShortcut() const {
+    if (m_shortcutEdits.size() != kShortcutActionCount) {
+        return {};
+    }
+    return m_shortcutEdits[kQuickPasteShortcutIndex]->keySequence();
+}
+
+QKeySequence SettingsDialog::openHistoryShortcut() const {
+    if (m_shortcutEdits.size() != kShortcutActionCount) {
+        return {};
+    }
+    return m_shortcutEdits[kOpenHistoryShortcutIndex]->keySequence();
+}
+
+QKeySequence SettingsDialog::openInspectorShortcut() const {
+    if (m_shortcutEdits.size() != kShortcutActionCount) {
+        return {};
+    }
+    return m_shortcutEdits[kOpenInspectorShortcutIndex]->keySequence();
 }
 
 bool SettingsDialog::startToTray() const {
@@ -305,6 +408,15 @@ QVector<bool> SettingsDialog::columnsFromChecks(const QVector<QCheckBox *> &chec
         visible.push_back(check && check->isChecked());
     }
     return visible;
+}
+
+QVector<QKeySequence> SettingsDialog::globalShortcuts() const {
+    QVector<QKeySequence> shortcuts;
+    shortcuts.reserve(m_shortcutEdits.size());
+    for (auto *edit : m_shortcutEdits) {
+        shortcuts.push_back(edit ? edit->keySequence() : QKeySequence());
+    }
+    return shortcuts;
 }
 
 QVector<bool> SettingsDialog::historyColumns() const {
@@ -347,7 +459,8 @@ bool SettingsDialog::hasUnsavedChanges() const {
         currentPolicy.maxEntryBytes != m_savedCapturePolicy.maxEntryBytes ||
         currentPolicy.customAllowlistPatterns != m_savedCapturePolicy.customAllowlistPatterns;
 
-    return shortcut() != m_savedShortcut || startToTray() != m_savedStartToTray ||
+    return globalShortcuts() != m_savedShortcuts ||
+           startToTray() != m_savedStartToTray ||
            historyColumns() != m_savedHistoryColumns ||
            quickPasteColumns() != m_savedQuickPasteColumns ||
            previewLineCount() != m_savedPreviewLines ||
@@ -356,12 +469,15 @@ bool SettingsDialog::hasUnsavedChanges() const {
 }
 
 void SettingsDialog::refreshApplyButtonState() {
-    if (!m_applyButton) {
-        return;
+    if (m_applyButton) {
+        const bool applyEnabled =
+            !m_loadingValues && !m_hasShortcutConflict && hasUnsavedChanges();
+        m_applyButton->setEnabled(applyEnabled);
     }
 
-    const bool enabled = !m_loadingValues && hasUnsavedChanges();
-    m_applyButton->setEnabled(enabled);
+    if (m_okButton) {
+        m_okButton->setEnabled(!m_hasShortcutConflict);
+    }
 }
 
 }  // namespace pastetry

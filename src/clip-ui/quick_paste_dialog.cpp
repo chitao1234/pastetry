@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QMenu>
+#include <QShortcut>
 #include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
@@ -176,6 +177,30 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
         setSearchMode(searchModeFromComboIndex(index));
         emit searchModeChanged(searchModeToString(m_searchMode));
     });
+
+    auto *focusSearchShortcut =
+        new QShortcut(QKeySequence::StandardKey::Find, this);
+    connect(focusSearchShortcut, &QShortcut::activated, this, [this] {
+        m_searchEdit->setFocus();
+        m_searchEdit->selectAll();
+    });
+    auto *refreshShortcut = new QShortcut(QKeySequence(Qt::Key_F5), this);
+    connect(refreshShortcut, &QShortcut::activated, this,
+            &QuickPasteDialog::refreshResults);
+
+    auto *activateReturnShortcut =
+        new QShortcut(QKeySequence(Qt::Key_Return), m_table);
+    connect(activateReturnShortcut, &QShortcut::activated, this,
+            &QuickPasteDialog::activateCurrent);
+    auto *activateEnterShortcut = new QShortcut(QKeySequence(Qt::Key_Enter), m_table);
+    connect(activateEnterShortcut, &QShortcut::activated, this,
+            &QuickPasteDialog::activateCurrent);
+    auto *pinShortcut =
+        new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_P), m_table);
+    connect(pinShortcut, &QShortcut::activated, this, &QuickPasteDialog::pinSelected);
+    auto *deleteShortcut = new QShortcut(QKeySequence::Delete, m_table);
+    connect(deleteShortcut, &QShortcut::activated, this,
+            &QuickPasteDialog::deleteSelected);
 
     syncSearchModeCombo();
     applyTableLayout();
