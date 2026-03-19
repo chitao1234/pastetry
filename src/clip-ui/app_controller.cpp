@@ -1093,20 +1093,7 @@ bool AppController::startSingleInstanceServer(QString *error) {
     }
 
     connect(m_singleInstanceServer, &QLocalServer::newConnection, this,
-            [this] {
-                while (m_singleInstanceServer->hasPendingConnections()) {
-                    QLocalSocket *socket = m_singleInstanceServer->nextPendingConnection();
-                    connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
-                        const QString command = QString::fromUtf8(socket->readAll()).trimmed();
-                        if (!command.isEmpty()) {
-                            handleSingleInstanceCommand(command);
-                        }
-                    });
-                    connect(socket, &QLocalSocket::disconnected, socket,
-                            &QLocalSocket::deleteLater);
-                }
-            },
-            Qt::UniqueConnection);
+            &AppController::handleSingleInstanceNewConnection, Qt::UniqueConnection);
 
     return true;
 }
@@ -1139,6 +1126,23 @@ AppController::promptSingleInstanceTakeover(const QString &detail) {
         return InstanceTakeoverDecision::TakeOver;
     }
     return InstanceTakeoverDecision::Exit;
+}
+
+void AppController::handleSingleInstanceNewConnection() {
+    if (!m_singleInstanceServer) {
+        return;
+    }
+
+    while (m_singleInstanceServer->hasPendingConnections()) {
+        QLocalSocket *socket = m_singleInstanceServer->nextPendingConnection();
+        connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
+            const QString command = QString::fromUtf8(socket->readAll()).trimmed();
+            if (!command.isEmpty()) {
+                handleSingleInstanceCommand(command);
+            }
+        });
+        connect(socket, &QLocalSocket::disconnected, socket, &QLocalSocket::deleteLater);
+    }
 }
 
 void AppController::handleSingleInstanceCommand(const QString &command) {

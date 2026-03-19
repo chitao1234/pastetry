@@ -45,6 +45,7 @@ private:
     bool hasLikelyPeerUiProcess(QString *detail = nullptr) const;
     bool startSingleInstanceServer(QString *error);
     InstanceTakeoverDecision promptSingleInstanceTakeover(const QString &detail);
+    void handleSingleInstanceNewConnection();
     void handleSingleInstanceCommand(const QString &command);
 
     void setupTray();
