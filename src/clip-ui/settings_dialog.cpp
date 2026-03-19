@@ -14,6 +14,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSpacerItem>
 #include <QSpinBox>
@@ -38,40 +39,52 @@ QString columnLabel(int column) {
     }
 }
 
-QString modeLabel(ShortcutBindingMode mode) {
-    switch (mode) {
-        case ShortcutBindingMode::Direct:
-            return QStringLiteral("Direct");
-        case ShortcutBindingMode::Chord:
-            return QStringLiteral("Chord");
-        case ShortcutBindingMode::Disabled:
-        default:
-            return QStringLiteral("Disabled");
+QKeySequence sequenceFromBinding(const ShortcutBindingConfig &binding) {
+    if (binding.mode == ShortcutBindingMode::Direct) {
+        if (binding.directSequence.count() <= 0) {
+            return {};
+        }
+        return QKeySequence(binding.directSequence[0]);
     }
+
+    if (binding.mode == ShortcutBindingMode::Chord) {
+        const QKeyCombination first =
+            binding.chordFirstSequence.count() > 0 ? binding.chordFirstSequence[0]
+                                                   : QKeyCombination();
+        const QKeyCombination second =
+            binding.chordSecondSequence.count() > 0 ? binding.chordSecondSequence[0]
+                                                    : QKeyCombination();
+        if (first.toCombined() != 0 && second.toCombined() != 0) {
+            return QKeySequence(first, second);
+        }
+        if (first.toCombined() != 0) {
+            return QKeySequence(first);
+        }
+        if (second.toCombined() != 0) {
+            return QKeySequence(second);
+        }
+    }
+
+    return {};
 }
 
-int modeComboIndex(ShortcutBindingMode mode) {
-    switch (mode) {
-        case ShortcutBindingMode::Direct:
-            return 1;
-        case ShortcutBindingMode::Chord:
-            return 2;
-        case ShortcutBindingMode::Disabled:
-        default:
-            return 0;
+ShortcutBindingConfig bindingFromSequence(const QKeySequence &sequence) {
+    ShortcutBindingConfig binding;
+    if (sequence.count() <= 0) {
+        binding.mode = ShortcutBindingMode::Disabled;
+        return binding;
     }
-}
 
-ShortcutBindingMode modeFromComboIndex(int index) {
-    switch (index) {
-        case 1:
-            return ShortcutBindingMode::Direct;
-        case 2:
-            return ShortcutBindingMode::Chord;
-        case 0:
-        default:
-            return ShortcutBindingMode::Disabled;
+    if (sequence.count() == 1) {
+        binding.mode = ShortcutBindingMode::Direct;
+        binding.directSequence = QKeySequence(sequence[0]);
+        return binding;
     }
+
+    binding.mode = ShortcutBindingMode::Chord;
+    binding.chordFirstSequence = QKeySequence(sequence[0]);
+    binding.chordSecondSequence = QKeySequence(sequence[1]);
+    return binding;
 }
 
 int captureProfileComboIndex(CaptureProfile profile) {
@@ -124,8 +137,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     shortcutsLayout->addWidget(autoPasteRow);
 
     auto *hintLabel = new QLabel(
-        QStringLiteral("Chord mode uses two global shortcuts (step 1 then step 2). "
-                       "Direct mode uses a single global shortcut."),
+        QStringLiteral("Enter one key sequence for direct mode, or a two-step sequence "
+                       "(for example: Ctrl+K, Ctrl+C) for chord mode. Clear to disable."),
         shortcutsTab);
     hintLabel->setWordWrap(true);
     shortcutsLayout->addWidget(hintLabel);
@@ -135,18 +148,12 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     auto *scrollContent = new QWidget(scroll);
     auto *grid = new QGridLayout(scrollContent);
     grid->setColumnStretch(0, 0);
-    grid->setColumnStretch(1, 0);
-    grid->setColumnStretch(2, 1);
-    grid->setColumnStretch(3, 1);
-    grid->setColumnStretch(4, 1);
-    grid->setColumnStretch(5, 2);
+    grid->setColumnStretch(1, 1);
+    grid->setColumnStretch(2, 2);
 
     grid->addWidget(new QLabel(QStringLiteral("Action"), scrollContent), 0, 0);
-    grid->addWidget(new QLabel(QStringLiteral("Mode"), scrollContent), 0, 1);
-    grid->addWidget(new QLabel(QStringLiteral("Direct"), scrollContent), 0, 2);
-    grid->addWidget(new QLabel(QStringLiteral("Chord Step 1"), scrollContent), 0, 3);
-    grid->addWidget(new QLabel(QStringLiteral("Chord Step 2"), scrollContent), 0, 4);
-    grid->addWidget(new QLabel(QStringLiteral("Status"), scrollContent), 0, 5);
+    grid->addWidget(new QLabel(QStringLiteral("Shortcut"), scrollContent), 0, 1);
+    grid->addWidget(new QLabel(QStringLiteral("Status"), scrollContent), 0, 2);
 
     int row = 1;
     QString currentGroup;
@@ -157,24 +164,13 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
             QFont boldFont = groupLabel->font();
             boldFont.setBold(true);
             groupLabel->setFont(boldFont);
-            grid->addWidget(groupLabel, row, 0, 1, 6);
+            grid->addWidget(groupLabel, row, 0, 1, 3);
             ++row;
         }
 
         ShortcutRowWidgets widgets;
-        widgets.mode = new QComboBox(scrollContent);
-        widgets.mode->addItem(modeLabel(ShortcutBindingMode::Disabled));
-        widgets.mode->addItem(modeLabel(ShortcutBindingMode::Direct));
-        widgets.mode->addItem(modeLabel(ShortcutBindingMode::Chord));
-
-        widgets.directEdit = new QKeySequenceEdit(scrollContent);
-        widgets.directEdit->setClearButtonEnabled(true);
-
-        widgets.chordFirstEdit = new QKeySequenceEdit(scrollContent);
-        widgets.chordFirstEdit->setClearButtonEnabled(true);
-
-        widgets.chordSecondEdit = new QKeySequenceEdit(scrollContent);
-        widgets.chordSecondEdit->setClearButtonEnabled(true);
+        widgets.shortcutEdit = new QKeySequenceEdit(scrollContent);
+        widgets.shortcutEdit->setClearButtonEnabled(true);
 
         widgets.statusLabel = new QLabel(scrollContent);
         widgets.statusLabel->setWordWrap(false);
@@ -183,31 +179,20 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 
         auto *nameLabel = new QLabel(spec.label, scrollContent);
         grid->addWidget(nameLabel, row, 0);
-        grid->addWidget(widgets.mode, row, 1);
-        grid->addWidget(widgets.directEdit, row, 2);
-        grid->addWidget(widgets.chordFirstEdit, row, 3);
-        grid->addWidget(widgets.chordSecondEdit, row, 4);
-        grid->addWidget(widgets.statusLabel, row, 5);
+        grid->addWidget(widgets.shortcutEdit, row, 1);
+        grid->addWidget(widgets.statusLabel, row, 2);
 
         m_shortcutRows.insert(spec.id, widgets);
 
-        connect(widgets.mode, qOverload<int>(&QComboBox::currentIndexChanged), this,
-                [this, actionId = spec.id](int) {
-                    emit shortcutsEdited();
-                    refreshShortcutRowState(actionId);
-                    refreshApplyButtonState();
-                });
-
-        auto onEditChanged = [this](const QKeySequence &) {
+        auto onEditChanged = [this, edit = widgets.shortcutEdit](const QKeySequence &sequence) {
+            if (edit && sequence.count() > 2) {
+                QSignalBlocker blocker(edit);
+                edit->setKeySequence(QKeySequence(sequence[0], sequence[1]));
+            }
             emit shortcutsEdited();
             refreshApplyButtonState();
         };
-        connect(widgets.directEdit, &QKeySequenceEdit::keySequenceChanged, this,
-                onEditChanged);
-        connect(widgets.chordFirstEdit, &QKeySequenceEdit::keySequenceChanged, this,
-                onEditChanged);
-        connect(widgets.chordSecondEdit, &QKeySequenceEdit::keySequenceChanged, this,
-                onEditChanged);
+        connect(widgets.shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this, onEditChanged);
 
         ++row;
     }
@@ -473,15 +458,8 @@ ShortcutBindingConfig SettingsDialog::bindingForAction(const QString &actionId) 
     }
 
     ShortcutBindingConfig binding;
-    binding.mode = modeFromComboIndex(it->mode ? it->mode->currentIndex() : 0);
-    if (it->directEdit) {
-        binding.directSequence = it->directEdit->keySequence();
-    }
-    if (it->chordFirstEdit) {
-        binding.chordFirstSequence = it->chordFirstEdit->keySequence();
-    }
-    if (it->chordSecondEdit) {
-        binding.chordSecondSequence = it->chordSecondEdit->keySequence();
+    if (it->shortcutEdit) {
+        binding = bindingFromSequence(it->shortcutEdit->keySequence());
     }
     return binding;
 }
@@ -493,41 +471,8 @@ void SettingsDialog::setBindingForAction(const QString &actionId,
         return;
     }
 
-    if (it->mode) {
-        it->mode->setCurrentIndex(modeComboIndex(binding.mode));
-    }
-    if (it->directEdit) {
-        it->directEdit->setKeySequence(binding.directSequence);
-    }
-    if (it->chordFirstEdit) {
-        it->chordFirstEdit->setKeySequence(binding.chordFirstSequence);
-    }
-    if (it->chordSecondEdit) {
-        it->chordSecondEdit->setKeySequence(binding.chordSecondSequence);
-    }
-
-    refreshShortcutRowState(actionId);
-}
-
-void SettingsDialog::refreshShortcutRowState(const QString &actionId) {
-    const auto it = m_shortcutRows.find(actionId);
-    if (it == m_shortcutRows.end()) {
-        return;
-    }
-
-    const ShortcutBindingMode mode =
-        modeFromComboIndex(it->mode ? it->mode->currentIndex() : 0);
-    const bool directEnabled = mode == ShortcutBindingMode::Direct;
-    const bool chordEnabled = mode == ShortcutBindingMode::Chord;
-
-    if (it->directEdit) {
-        it->directEdit->setEnabled(directEnabled);
-    }
-    if (it->chordFirstEdit) {
-        it->chordFirstEdit->setEnabled(chordEnabled);
-    }
-    if (it->chordSecondEdit) {
-        it->chordSecondEdit->setEnabled(chordEnabled);
+    if (it->shortcutEdit) {
+        it->shortcutEdit->setKeySequence(sequenceFromBinding(binding));
     }
 }
 

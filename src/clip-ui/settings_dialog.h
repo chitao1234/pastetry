@@ -55,17 +55,13 @@ signals:
 
 private:
     struct ShortcutRowWidgets {
-        QComboBox *mode = nullptr;
-        QKeySequenceEdit *directEdit = nullptr;
-        QKeySequenceEdit *chordFirstEdit = nullptr;
-        QKeySequenceEdit *chordSecondEdit = nullptr;
+        QKeySequenceEdit *shortcutEdit = nullptr;
         QLabel *statusLabel = nullptr;
     };
 
     ShortcutBindingConfig bindingForAction(const QString &actionId) const;
     void setBindingForAction(const QString &actionId,
                              const ShortcutBindingConfig &binding);
-    void refreshShortcutRowState(const QString &actionId);
     QVector<bool> columnsFromChecks(const QVector<QCheckBox *> &checks) const;
     bool hasUnsavedChanges() const;
     void refreshApplyButtonState();
