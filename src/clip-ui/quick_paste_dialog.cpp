@@ -1,6 +1,6 @@
 #include "clip-ui/quick_paste_dialog.h"
 
-#include "clip-ui/entry_inspector_dialog.h"
+#include "clip-ui/clipboard_inspector_dialog.h"
 #include "clip-ui/preview_text_delegate.h"
 
 #include <QAction>
@@ -570,10 +570,11 @@ void QuickPasteDialog::inspectEntry(qint64 entryId) {
         return;
     }
 
-    if (!m_entryInspectorDialog) {
-        m_entryInspectorDialog = new EntryInspectorDialog(m_client, nullptr);
+    if (!m_clipboardInspectorDialog) {
+        m_clipboardInspectorDialog =
+            new ClipboardInspectorDialog(m_client, nullptr);
     }
-    m_entryInspectorDialog->inspectEntry(entryId);
+    m_clipboardInspectorDialog->inspectEntry(entryId);
 }
 
 }  // namespace pastetry

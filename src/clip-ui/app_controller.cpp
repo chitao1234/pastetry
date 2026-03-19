@@ -198,7 +198,7 @@ void AppController::setupTray() {
     m_openHistoryAction = menu->addAction(QStringLiteral("Open History"));
     m_openQuickPasteAction = menu->addAction(QStringLiteral("Open Quick Paste"));
     m_openClipboardInspectorAction =
-        menu->addAction(QStringLiteral("Clipboard Inspector"));
+        menu->addAction(QStringLiteral("Inspector"));
     menu->addSeparator();
     m_openSettingsAction = menu->addAction(QStringLiteral("Settings"));
     menu->addSeparator();
@@ -245,13 +245,10 @@ void AppController::showQuickPastePopup() {
 
 void AppController::openClipboardInspector() {
     if (!m_clipboardInspectorDialog) {
-        m_clipboardInspectorDialog = new ClipboardInspectorDialog(&m_mainWindow);
+        m_clipboardInspectorDialog =
+            new ClipboardInspectorDialog(m_client, &m_mainWindow);
     }
-
-    m_clipboardInspectorDialog->show();
-    m_clipboardInspectorDialog->raise();
-    m_clipboardInspectorDialog->activateWindow();
-    m_clipboardInspectorDialog->refresh();
+    m_clipboardInspectorDialog->inspectClipboard();
 }
 
 void AppController::openSettings() {

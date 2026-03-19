@@ -18,7 +18,7 @@ class QComboBox;
 namespace pastetry {
 
 class PreviewTextDelegate;
-class EntryInspectorDialog;
+class ClipboardInspectorDialog;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -73,7 +73,7 @@ private:
     QPushButton *m_clearButton = nullptr;
     QTimer *m_searchTimer = nullptr;
     QTimer *m_newHighlightTimer = nullptr;
-    EntryInspectorDialog *m_entryInspectorDialog = nullptr;
+    ClipboardInspectorDialog *m_clipboardInspectorDialog = nullptr;
     int m_cursor = 0;
     bool m_closeToTrayEnabled = true;
     QVector<bool> m_visibleColumns = {true, true, true, true};

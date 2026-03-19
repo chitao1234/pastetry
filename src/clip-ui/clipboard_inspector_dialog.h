@@ -1,5 +1,8 @@
 #pragma once
 
+#include "common/ipc_client.h"
+
+#include <QCborMap>
 #include <QClipboard>
 #include <QByteArray>
 #include <QDialog>
@@ -13,6 +16,7 @@ class QLabel;
 class QMimeData;
 class QPlainTextEdit;
 class QTableWidget;
+class QWidget;
 
 namespace pastetry {
 
@@ -20,13 +24,28 @@ class ClipboardInspectorDialog : public QDialog {
     Q_OBJECT
 
 public:
-    explicit ClipboardInspectorDialog(QWidget *parent = nullptr);
+    enum class SourceMode {
+        Clipboard = 0,
+        StoredEntry = 1,
+    };
+
+    explicit ClipboardInspectorDialog(IpcClient client, QWidget *parent = nullptr);
+
+    void inspectClipboard();
+    void inspectEntry(qint64 entryId);
     void refresh();
 
 private:
     struct FormatSnapshot {
         QString mimeType;
+        qint64 byteSize = 0;
+        QString blobHash;
+
+        bool payloadFetched = false;
         QByteArray payload;
+        bool payloadTruncated = false;
+        qint64 payloadOriginalSize = 0;
+
         QString kind;
         QString textPreview;
         QStringList urlPreview;
@@ -34,17 +53,49 @@ private:
         bool textTruncated = false;
     };
 
-    QClipboard::Mode currentMode() const;
-    void updateSummaryLabel(const QMimeData *mimeData, QClipboard::Mode mode);
-    void clearDetails();
-    void updateSelectedDetails();
-    void appendSnapshotRow(int row, const FormatSnapshot &snapshot);
-    FormatSnapshot buildSnapshot(const QString &mimeType,
-                                const QMimeData *mimeData) const;
+    SourceMode currentSourceMode() const;
+    void setSourceMode(SourceMode mode);
 
+    QClipboard::Mode currentClipboardMode() const;
+
+    void refreshClipboard();
+    void refreshStoredEntry();
+
+    void clearFormats();
+    void clearDetails();
+    void appendSnapshotRow(int row, const FormatSnapshot &snapshot);
+
+    void updateSummaryLabelClipboard(const QMimeData *mimeData,
+                                     QClipboard::Mode mode);
+    void updateSummaryLabelStoredEntry(const QCborMap &detail,
+                                       int formatCount);
+
+    FormatSnapshot buildSnapshotFromClipboard(const QString &mimeType,
+                                              const QMimeData *mimeData) const;
+    void populateSnapshotFromPayload(FormatSnapshot *snapshot) const;
+
+    bool ensureStoredPayloadLoaded(int index, QString *error);
+    QByteArray requestStoredPayload(const FormatSnapshot &snapshot, QString *error,
+                                    bool *truncated,
+                                    qint64 *originalSize) const;
+    QImage requestStoredImagePreview(const QString &blobHash,
+                                     QString *error) const;
+
+    void updateSelectedDetails();
+
+    IpcClient m_client;
     QClipboard *m_clipboard = nullptr;
-    QComboBox *m_modeCombo = nullptr;
+
+    qint64 m_entryId = -1;
+
+    QComboBox *m_sourceModeCombo = nullptr;
+    QWidget *m_clipboardModeContainer = nullptr;
+    QComboBox *m_clipboardModeCombo = nullptr;
+
     QLabel *m_summaryLabel = nullptr;
+    QWidget *m_entryPreviewContainer = nullptr;
+    QPlainTextEdit *m_entryPreview = nullptr;
+
     QTableWidget *m_table = nullptr;
     QPlainTextEdit *m_detailView = nullptr;
     QLabel *m_imagePreviewLabel = nullptr;
