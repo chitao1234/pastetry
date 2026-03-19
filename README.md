@@ -65,6 +65,7 @@ Optional arguments for both binaries:
 
 - `--data-dir <dir>`
 - `--socket <name>`
+- If UI cannot reach daemon, it warns and keeps retrying connectivity in the background.
 
 ### Quick-paste shortcut
 

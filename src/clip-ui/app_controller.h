@@ -8,6 +8,7 @@
 
 #include <QObject>
 #include <QSettings>
+#include <QTimer>
 #include <QVector>
 
 class QAction;
@@ -39,6 +40,9 @@ private:
     void saveSettings();
     void applyShortcutSetting();
     void applyViewSettings();
+    void checkDaemonConnectivity(bool notifyIfUnavailable);
+    void notifyDaemonUnavailable(const QString &reason);
+    void notifyDaemonRecovered();
     QVector<bool> parseColumns(const QString &text,
                                const QVector<bool> &fallback) const;
     QString serializeColumns(const QVector<bool> &columns) const;
@@ -69,6 +73,9 @@ private:
     QLocalServer *m_singleInstanceServer = nullptr;
     QString m_singleInstanceName;
     bool m_isQuitting = false;
+    bool m_daemonStatusKnown = false;
+    bool m_daemonReachable = false;
+    QTimer m_daemonHealthTimer;
 };
 
 }  // namespace pastetry

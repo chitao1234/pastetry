@@ -321,6 +321,12 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         return ipc::makeResponse(id, toCbor(detail));
     }
 
+    if (method == "Ping") {
+        QCborMap payload;
+        payload.insert(QStringLiteral("status"), QStringLiteral("ok"));
+        return ipc::makeResponse(id, payload);
+    }
+
     if (method == "ActivateEntry") {
         const qint64 entryId = params.value("entry_id").toInteger();
         const QString preferredFormat = params.value("preferred_format").toString();

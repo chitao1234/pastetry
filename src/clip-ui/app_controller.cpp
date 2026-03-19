@@ -4,6 +4,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCborMap>
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -82,6 +83,10 @@ AppController::AppController(AppPaths paths, QObject *parent)
         m_shortcutService.unregisterShortcut();
         saveSettings();
     });
+
+    m_daemonHealthTimer.setInterval(4000);
+    connect(&m_daemonHealthTimer, &QTimer::timeout, this,
+            [this] { checkDaemonConnectivity(false); });
 }
 
 bool AppController::initialize(QString *error) {
@@ -103,6 +108,8 @@ bool AppController::initialize(QString *error) {
     m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
                                        m_trayIcon->isVisible());
     applyShortcutSetting();
+    checkDaemonConnectivity(true);
+    m_daemonHealthTimer.start();
 
     if (!m_startToTray || !m_trayIcon || !m_trayIcon->isVisible()) {
         showMainWindow();
@@ -287,6 +294,58 @@ void AppController::applyShortcutSetting() {
                                     shortcutStatusText(),
                                     QSystemTrayIcon::Warning, 2500);
         }
+    }
+}
+
+void AppController::checkDaemonConnectivity(bool notifyIfUnavailable) {
+    QString error;
+    QCborMap params;
+    m_client.request(QStringLiteral("Ping"), params, 800, &error);
+
+    const bool reachable = error.isEmpty();
+    if (!m_daemonStatusKnown) {
+        m_daemonStatusKnown = true;
+        m_daemonReachable = reachable;
+        if (!reachable && notifyIfUnavailable) {
+            notifyDaemonUnavailable(error);
+        }
+        return;
+    }
+
+    if (reachable == m_daemonReachable) {
+        return;
+    }
+
+    m_daemonReachable = reachable;
+    if (reachable) {
+        notifyDaemonRecovered();
+    } else {
+        notifyDaemonUnavailable(error);
+    }
+}
+
+void AppController::notifyDaemonUnavailable(const QString &reason) {
+    const QString detail = reason.isEmpty() ? QStringLiteral("Unknown error") : reason;
+    const QString message = QStringLiteral(
+        "Cannot connect to daemon (pastetry-clipd).\n"
+        "Clipboard capture and activation may not work until the daemon is running.\n\n"
+        "Reason: %1")
+                                .arg(detail);
+
+    if (m_trayIcon && m_trayIcon->isVisible()) {
+        m_trayIcon->showMessage(QStringLiteral("Pastetry daemon unavailable"), message,
+                                QSystemTrayIcon::Warning, 5000);
+        return;
+    }
+
+    QMessageBox::warning(&m_mainWindow, QStringLiteral("Daemon unavailable"), message);
+}
+
+void AppController::notifyDaemonRecovered() {
+    if (m_trayIcon && m_trayIcon->isVisible()) {
+        m_trayIcon->showMessage(QStringLiteral("Pastetry daemon reachable"),
+                                QStringLiteral("Connection to pastetry-clipd restored."),
+                                QSystemTrayIcon::Information, 2500);
     }
 }
 
