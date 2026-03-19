@@ -111,6 +111,40 @@ CaptureProfile captureProfileFromComboIndex(int index) {
     }
 }
 
+QString normalizedPopupPositionMode(const QString &text) {
+    const QString normalized = text.trimmed().toLower();
+    if (normalized == QStringLiteral("caret")) {
+        return QStringLiteral("caret");
+    }
+    if (normalized == QStringLiteral("last_location")) {
+        return QStringLiteral("last_location");
+    }
+    return QStringLiteral("cursor");
+}
+
+int popupPositionModeComboIndex(const QString &mode) {
+    const QString normalized = normalizedPopupPositionMode(mode);
+    if (normalized == QStringLiteral("caret")) {
+        return 0;
+    }
+    if (normalized == QStringLiteral("last_location")) {
+        return 2;
+    }
+    return 1;
+}
+
+QString popupPositionModeFromComboIndex(int index) {
+    switch (index) {
+        case 0:
+            return QStringLiteral("caret");
+        case 2:
+            return QStringLiteral("last_location");
+        case 1:
+        default:
+            return QStringLiteral("cursor");
+    }
+}
+
 }  // namespace
 
 SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
@@ -213,7 +247,18 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     generalForm->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
     m_startToTray = new QCheckBox(QStringLiteral("Start minimized to tray"), generalTab);
+    m_popupPositionMode = new QComboBox(generalTab);
+    m_popupPositionMode->addItem(QStringLiteral("At caret"),
+                                 QStringLiteral("caret"));
+    m_popupPositionMode->addItem(QStringLiteral("At cursor"),
+                                 QStringLiteral("cursor"));
+    m_popupPositionMode->addItem(QStringLiteral("At last location"),
+                                 QStringLiteral("last_location"));
+    m_popupPositionMode->setToolTip(
+        QStringLiteral("Choose where Quick Paste opens.\n"
+                       "Caret mode falls back to cursor when caret position is unavailable."));
     generalForm->addRow(QString(), m_startToTray);
+    generalForm->addRow(QStringLiteral("Quick Paste popup position"), m_popupPositionMode);
     generalForm->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum,
                                          QSizePolicy::Expanding));
     tabs->addTab(generalTab, QStringLiteral("General"));
@@ -330,6 +375,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 
     connect(m_startToTray, &QCheckBox::toggled, this,
             [this] { refreshApplyButtonState(); });
+    connect(m_popupPositionMode, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { refreshApplyButtonState(); });
     connect(m_previewLines, qOverload<int>(&QSpinBox::valueChanged), this,
             [this](int) { refreshApplyButtonState(); });
     connect(m_regexStrictFullScan, &QCheckBox::toggled, this,
@@ -370,7 +417,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
 void SettingsDialog::setValues(
     const QHash<QString, ShortcutBindingConfig> &shortcutBindings,
     const QHash<QString, QString> &shortcutStatusTextByAction,
-    const QKeySequence &autoPasteKey, bool startToTray, bool hasShortcutConflict,
+    const QKeySequence &autoPasteKey, bool startToTray, const QString &popupPositionMode,
+    bool hasShortcutConflict,
     const QString &shortcutConflictMessage, const QVector<bool> &historyColumns,
     const QVector<bool> &quickPasteColumns, int previewLineCount,
     bool regexStrictFullScan, const CapturePolicy &capturePolicy) {
@@ -385,6 +433,7 @@ void SettingsDialog::setValues(
 
     m_autoPasteKeyEdit->setKeySequence(autoPasteKey);
     m_startToTray->setChecked(startToTray);
+    m_popupPositionMode->setCurrentIndex(popupPositionModeComboIndex(popupPositionMode));
     setShortcutStatusTexts(shortcutStatusTextByAction);
     setShortcutConflictState(hasShortcutConflict, shortcutConflictMessage);
 
@@ -410,6 +459,7 @@ void SettingsDialog::setValues(
     m_savedShortcutBindings = allShortcutBindings();
     m_savedAutoPasteKey = m_autoPasteKeyEdit->keySequence();
     m_savedStartToTray = startToTray;
+    m_savedPopupPositionMode = this->popupPositionMode();
     m_savedHistoryColumns = columnsFromChecks(m_historyColumnChecks);
     m_savedQuickPasteColumns = columnsFromChecks(m_quickPasteColumnChecks);
     m_savedPreviewLines = m_previewLines->value();
@@ -499,6 +549,13 @@ bool SettingsDialog::startToTray() const {
     return m_startToTray->isChecked();
 }
 
+QString SettingsDialog::popupPositionMode() const {
+    if (!m_popupPositionMode) {
+        return QStringLiteral("cursor");
+    }
+    return popupPositionModeFromComboIndex(m_popupPositionMode->currentIndex());
+}
+
 QVector<bool> SettingsDialog::columnsFromChecks(const QVector<QCheckBox *> &checks) const {
     QVector<bool> visible;
     visible.reserve(checks.size());
@@ -561,6 +618,7 @@ bool SettingsDialog::hasUnsavedChanges() const {
     return allShortcutBindings() != m_savedShortcutBindings ||
            autoPasteKey() != m_savedAutoPasteKey ||
            startToTray() != m_savedStartToTray ||
+           popupPositionMode() != m_savedPopupPositionMode ||
            historyColumns() != m_savedHistoryColumns ||
            quickPasteColumns() != m_savedQuickPasteColumns ||
            previewLineCount() != m_savedPreviewLines ||

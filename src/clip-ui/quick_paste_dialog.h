@@ -24,12 +24,23 @@ class QuickPasteDialog : public QDialog {
     Q_OBJECT
 
 public:
+    enum class PopupPositionMode {
+        Caret,
+        Cursor,
+        LastLocation,
+    };
+
     explicit QuickPasteDialog(IpcAsyncRunner *ipcRunner, QWidget *parent = nullptr);
     void setVisibleColumns(const QVector<bool> &visibleColumns);
     void setPreviewLineCount(int lineCount);
     void setSearchMode(SearchMode mode);
     SearchMode searchMode() const;
     void setRegexStrict(bool enabled);
+    void setPopupPositionMode(PopupPositionMode mode);
+    PopupPositionMode popupPositionMode() const;
+    void setLastPopupPosition(const QPoint &position, bool hasPosition);
+    QPoint lastPopupPosition() const;
+    bool hasLastPopupPosition() const;
 
 public slots:
     void openPopup();
@@ -77,6 +88,9 @@ private:
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;
     bool m_regexStrict = false;
+    PopupPositionMode m_popupPositionMode = PopupPositionMode::Cursor;
+    QPoint m_lastPopupPosition;
+    bool m_hasLastPopupPosition = false;
     bool m_searchInFlight = false;
     bool m_searchPending = false;
     QCborMap m_pendingSearchParams;

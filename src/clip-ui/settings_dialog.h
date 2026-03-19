@@ -28,6 +28,7 @@ public:
                    const QHash<QString, QString> &shortcutStatusTextByAction,
                    const QKeySequence &autoPasteKey,
                    bool startToTray,
+                   const QString &popupPositionMode,
                    bool hasShortcutConflict,
                    const QString &shortcutConflictMessage,
                    const QVector<bool> &historyColumns,
@@ -40,6 +41,7 @@ public:
     QHash<QString, ShortcutBindingConfig> shortcutBindings() const;
     QKeySequence autoPasteKey() const;
     bool startToTray() const;
+    QString popupPositionMode() const;
     QVector<bool> historyColumns() const;
     QVector<bool> quickPasteColumns() const;
     int previewLineCount() const;
@@ -71,6 +73,7 @@ private:
     QLabel *m_shortcutConflictLabel = nullptr;
     QKeySequenceEdit *m_autoPasteKeyEdit = nullptr;
     QCheckBox *m_startToTray = nullptr;
+    QComboBox *m_popupPositionMode = nullptr;
     QSpinBox *m_previewLines = nullptr;
     QCheckBox *m_regexStrictFullScan = nullptr;
     QComboBox *m_captureProfile = nullptr;
@@ -85,6 +88,7 @@ private:
     QHash<QString, ShortcutBindingConfig> m_savedShortcutBindings;
     QKeySequence m_savedAutoPasteKey;
     bool m_savedStartToTray = true;
+    QString m_savedPopupPositionMode = QStringLiteral("cursor");
     QVector<bool> m_savedHistoryColumns;
     QVector<bool> m_savedQuickPasteColumns;
     int m_savedPreviewLines = 2;

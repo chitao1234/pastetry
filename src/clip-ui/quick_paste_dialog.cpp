@@ -22,6 +22,9 @@
 #include <QTableView>
 #include <QTimer>
 #include <QHBoxLayout>
+#include <QInputMethod>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QVBoxLayout>
 
 namespace pastetry {
@@ -97,6 +100,53 @@ QString formatMenuLabel(const FormatMenuItem &format) {
     return QStringLiteral("%1 (%2)")
         .arg(format.mimeType,
              QLocale().formattedDataSize(qMax<qint64>(0, format.byteSize)));
+}
+
+QPoint clampTopLeftToScreen(const QPoint &topLeft, const QSize &windowSize) {
+    if (windowSize.width() <= 0 || windowSize.height() <= 0) {
+        return topLeft;
+    }
+
+    QScreen *screen = QGuiApplication::screenAt(topLeft);
+    if (!screen) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    if (!screen) {
+        return topLeft;
+    }
+
+    const QRect available = screen->availableGeometry();
+    if (!available.isValid()) {
+        return topLeft;
+    }
+
+    const int maxX = available.right() - windowSize.width() + 1;
+    const int maxY = available.bottom() - windowSize.height() + 1;
+    const int x = qBound(available.left(), topLeft.x(), maxX);
+    const int y = qBound(available.top(), topLeft.y(), maxY);
+    return QPoint(x, y);
+}
+
+bool tryResolveCaretScreenPosition(QPoint *out) {
+    if (!out) {
+        return false;
+    }
+
+    QInputMethod *inputMethod = qApp ? qApp->inputMethod() : nullptr;
+    if (!inputMethod) {
+        return false;
+    }
+
+    const QRectF cursorRect = inputMethod->cursorRectangle();
+    if (!cursorRect.isValid() || cursorRect.isNull()) {
+        return false;
+    }
+
+    const QPointF mapped =
+        inputMethod->inputItemTransform().map(cursorRect.bottomLeft()) +
+        inputMethod->inputItemRectangle().topLeft();
+    *out = mapped.toPoint();
+    return true;
 }
 
 }  // namespace
@@ -270,10 +320,50 @@ void QuickPasteDialog::setRegexStrict(bool enabled) {
     }
 }
 
+void QuickPasteDialog::setPopupPositionMode(PopupPositionMode mode) {
+    m_popupPositionMode = mode;
+}
+
+QuickPasteDialog::PopupPositionMode QuickPasteDialog::popupPositionMode() const {
+    return m_popupPositionMode;
+}
+
+void QuickPasteDialog::setLastPopupPosition(const QPoint &position, bool hasPosition) {
+    m_lastPopupPosition = position;
+    m_hasLastPopupPosition = hasPosition;
+}
+
+QPoint QuickPasteDialog::lastPopupPosition() const {
+    return m_lastPopupPosition;
+}
+
+bool QuickPasteDialog::hasLastPopupPosition() const {
+    return m_hasLastPopupPosition;
+}
+
 void QuickPasteDialog::openPopup() {
     if (!isVisible()) {
-        const QPoint cursorPos = QCursor::pos();
-        move(cursorPos.x() - width() / 2, cursorPos.y() - 40);
+        QPoint topLeft;
+        bool hasTopLeft = false;
+
+        if (m_popupPositionMode == PopupPositionMode::LastLocation && m_hasLastPopupPosition) {
+            topLeft = m_lastPopupPosition;
+            hasTopLeft = true;
+        }
+
+        if (!hasTopLeft) {
+            QPoint anchor = QCursor::pos();
+            if (m_popupPositionMode == PopupPositionMode::Caret) {
+                QPoint caretPos;
+                if (tryResolveCaretScreenPosition(&caretPos)) {
+                    anchor = caretPos;
+                }
+            }
+
+            topLeft = QPoint(anchor.x() - width() / 2, anchor.y() - 40);
+        }
+
+        move(clampTopLeftToScreen(topLeft, size()));
         show();
     }
 
@@ -312,6 +402,8 @@ void QuickPasteDialog::keyPressEvent(QKeyEvent *event) {
 
 void QuickPasteDialog::hideEvent(QHideEvent *event) {
     QDialog::hideEvent(event);
+    m_lastPopupPosition = pos();
+    m_hasLastPopupPosition = true;
     emit popupHidden();
 }
 

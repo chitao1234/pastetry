@@ -49,6 +49,8 @@ constexpr const char *kSettingsAutoPasteKey = "hotkey/auto_paste_key";
 constexpr const char *kSettingsStartToTray = "ui/start_to_tray";
 constexpr const char *kSettingsPopupGeometry = "popup/last_geometry";
 constexpr const char *kSettingsQuickPasteSize = "popup/size";
+constexpr const char *kSettingsQuickPastePosition = "popup/position";
+constexpr const char *kSettingsPopupPositionMode = "popup/position_mode";
 constexpr const char *kSettingsHistoryColumns = "ui/history_columns";
 constexpr const char *kSettingsQuickColumns = "ui/quick_paste_columns";
 constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
@@ -124,6 +126,28 @@ bool parseCapturePolicyFromCborResult(const QCborMap &result, CapturePolicy *pol
         error->clear();
     }
     return true;
+}
+
+QString normalizedPopupPositionMode(const QString &text) {
+    const QString normalized = text.trimmed().toLower();
+    if (normalized == QStringLiteral("caret")) {
+        return QStringLiteral("caret");
+    }
+    if (normalized == QStringLiteral("last_location")) {
+        return QStringLiteral("last_location");
+    }
+    return QStringLiteral("cursor");
+}
+
+QuickPasteDialog::PopupPositionMode popupPositionModeFromString(const QString &text) {
+    const QString normalized = normalizedPopupPositionMode(text);
+    if (normalized == QStringLiteral("caret")) {
+        return QuickPasteDialog::PopupPositionMode::Caret;
+    }
+    if (normalized == QStringLiteral("last_location")) {
+        return QuickPasteDialog::PopupPositionMode::LastLocation;
+    }
+    return QuickPasteDialog::PopupPositionMode::Cursor;
 }
 
 QString shortcutKey(const QKeySequence &shortcut) {
@@ -510,9 +534,21 @@ AppController::AppController(AppPaths paths, QObject *parent)
             });
 
     connect(&m_quickPasteDialog, &QuickPasteDialog::popupHidden, this, [this] {
+        bool changed = false;
         const QSize popupSize = m_quickPasteDialog.size();
         if (popupSize.isValid() && popupSize != m_quickPasteSize) {
             m_quickPasteSize = popupSize;
+            changed = true;
+        }
+
+        const QPoint popupPosition = m_quickPasteDialog.pos();
+        if (!m_hasQuickPastePosition || popupPosition != m_quickPastePosition) {
+            m_quickPastePosition = popupPosition;
+            m_hasQuickPastePosition = true;
+            changed = true;
+        }
+
+        if (changed) {
             saveSettings();
         }
     });
@@ -556,6 +592,8 @@ AppController::AppController(AppPaths paths, QObject *parent)
         if (popupSize.isValid()) {
             m_quickPasteSize = popupSize;
         }
+        m_quickPastePosition = m_quickPasteDialog.pos();
+        m_hasQuickPastePosition = true;
         m_mainWindow.setCloseToTrayEnabled(false);
         clearChordCaptureRegistrations();
         clearShortcutRegistrations();
@@ -640,10 +678,17 @@ bool AppController::initialize(QString *error) {
     }
 
     loadSettings();
+    m_quickPasteDialog.setPopupPositionMode(popupPositionModeFromString(m_popupPositionMode));
+    m_quickPasteDialog.setLastPopupPosition(m_quickPastePosition, m_hasQuickPastePosition);
     if (m_quickPasteSize.isValid()) {
         m_quickPasteDialog.resize(m_quickPasteSize);
     } else if (!m_popupGeometry.isEmpty()) {
         m_quickPasteDialog.restoreGeometry(m_popupGeometry);
+        if (!m_hasQuickPastePosition) {
+            m_quickPastePosition = m_quickPasteDialog.pos();
+            m_hasQuickPastePosition = true;
+            m_quickPasteDialog.setLastPopupPosition(m_quickPastePosition, true);
+        }
     }
     m_quickPasteSize = m_quickPasteDialog.size();
     applyViewSettings();
@@ -773,7 +818,7 @@ void AppController::openSettings() {
     };
 
     dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
-                     m_startToTray, false, QString(), m_historyColumns,
+                     m_startToTray, m_popupPositionMode, false, QString(), m_historyColumns,
                      m_quickPasteColumns, m_previewLineCount, m_regexStrictFullScan,
                      m_capturePolicy);
 
@@ -800,7 +845,8 @@ void AppController::openSettings() {
             m_capturePolicy = loaded;
             if (!dialog.hasPendingChanges()) {
                 dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
-                                 m_startToTray, false, QString(), m_historyColumns,
+                                 m_startToTray, m_popupPositionMode, false, QString(),
+                                 m_historyColumns,
                                  m_quickPasteColumns, m_previewLineCount,
                                  m_regexStrictFullScan, m_capturePolicy);
             }
@@ -859,6 +905,8 @@ void AppController::openSettings() {
         const QHash<QString, ShortcutBindingConfig> requestedShortcuts = dialog.shortcutBindings();
         const QKeySequence requestedAutoPasteKey = dialog.autoPasteKey();
         const bool requestedStartToTray = dialog.startToTray();
+        const QString requestedPopupPositionMode =
+            normalizedPopupPositionMode(dialog.popupPositionMode());
         const QVector<bool> requestedHistoryColumns =
             normalizedColumns(dialog.historyColumns());
         const QVector<bool> requestedQuickPasteColumns =
@@ -872,6 +920,8 @@ void AppController::openSettings() {
         const bool shortcutsChanged = requestedShortcuts != m_shortcutBindings;
         const bool autoPasteChanged = requestedAutoPasteKey != m_autoPasteKey;
         const bool startToTrayChanged = requestedStartToTray != m_startToTray;
+        const bool popupPositionModeChanged =
+            requestedPopupPositionMode != m_popupPositionMode;
         const bool historyColumnsChanged = requestedHistoryColumns != m_historyColumns;
         const bool quickColumnsChanged = requestedQuickPasteColumns != m_quickPasteColumns;
         const bool previewLineCountChanged = requestedPreviewLineCount != m_previewLineCount;
@@ -879,6 +929,7 @@ void AppController::openSettings() {
         const bool capturePolicyChanged = !capturePolicyEquals(requestedPolicy, m_capturePolicy);
 
         const bool anyChanged = shortcutsChanged || autoPasteChanged || startToTrayChanged ||
+                                popupPositionModeChanged ||
                                 historyColumnsChanged || quickColumnsChanged ||
                                 previewLineCountChanged || regexStrictChanged ||
                                 capturePolicyChanged;
@@ -890,11 +941,13 @@ void AppController::openSettings() {
         }
 
         auto commitLocalChanges = [&, requestedShortcuts, requestedAutoPasteKey,
-                                   requestedStartToTray, requestedHistoryColumns,
+                                   requestedStartToTray, requestedPopupPositionMode,
+                                   requestedHistoryColumns,
                                    requestedQuickPasteColumns, requestedPreviewLineCount,
                                    requestedRegexStrict, closeOnSuccess,
                                    shortcutsChanged, autoPasteChanged, startToTrayChanged,
-                                   historyColumnsChanged, quickColumnsChanged,
+                                   popupPositionModeChanged, historyColumnsChanged,
+                                   quickColumnsChanged,
                                    previewLineCountChanged, regexStrictChanged](
                                       const CapturePolicy &effectivePolicy) {
             if (shortcutsChanged) {
@@ -905,6 +958,9 @@ void AppController::openSettings() {
             }
             if (startToTrayChanged) {
                 m_startToTray = requestedStartToTray;
+            }
+            if (popupPositionModeChanged) {
+                m_popupPositionMode = requestedPopupPositionMode;
             }
             if (historyColumnsChanged) {
                 m_historyColumns = requestedHistoryColumns;
@@ -924,6 +980,10 @@ void AppController::openSettings() {
                 m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
                                                    m_trayIcon->isVisible());
             }
+            if (popupPositionModeChanged) {
+                m_quickPasteDialog.setPopupPositionMode(
+                    popupPositionModeFromString(m_popupPositionMode));
+            }
 
             if (historyColumnsChanged || quickColumnsChanged || previewLineCountChanged ||
                 regexStrictChanged) {
@@ -935,7 +995,8 @@ void AppController::openSettings() {
             saveSettings();
 
             dialog.setValues(m_shortcutBindings, currentStatusTexts(), m_autoPasteKey,
-                             m_startToTray, false, QString(), m_historyColumns,
+                             m_startToTray, m_popupPositionMode, false, QString(),
+                             m_historyColumns,
                              m_quickPasteColumns, m_previewLineCount,
                              m_regexStrictFullScan, m_capturePolicy);
             updateShortcutAvailability();
@@ -1347,6 +1408,15 @@ void AppController::loadSettings() {
     } else {
         m_quickPasteSize = QSize();
     }
+    m_popupPositionMode = normalizedPopupPositionMode(
+        m_settings.value(kSettingsPopupPositionMode, QStringLiteral("cursor")).toString());
+    if (m_settings.contains(kSettingsQuickPastePosition)) {
+        m_quickPastePosition = m_settings.value(kSettingsQuickPastePosition).toPoint();
+        m_hasQuickPastePosition = true;
+    } else {
+        m_quickPastePosition = QPoint();
+        m_hasQuickPastePosition = false;
+    }
     m_historyColumns = parseColumns(m_settings.value(kSettingsHistoryColumns).toString(),
                                     m_historyColumns);
     m_quickPasteColumns = parseColumns(m_settings.value(kSettingsQuickColumns).toString(),
@@ -1414,6 +1484,10 @@ void AppController::saveSettings() {
     setValueIfChanged(QString::fromUtf8(kSettingsPopupGeometry), m_popupGeometry);
     if (m_quickPasteSize.isValid()) {
         setValueIfChanged(QString::fromUtf8(kSettingsQuickPasteSize), m_quickPasteSize);
+    }
+    setValueIfChanged(QString::fromUtf8(kSettingsPopupPositionMode), m_popupPositionMode);
+    if (m_hasQuickPastePosition) {
+        setValueIfChanged(QString::fromUtf8(kSettingsQuickPastePosition), m_quickPastePosition);
     }
     setValueIfChanged(QString::fromUtf8(kSettingsHistoryColumns),
                       serializeColumns(m_historyColumns));
