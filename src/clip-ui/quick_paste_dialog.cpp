@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QCborArray>
 #include <QCborMap>
+#include <QComboBox>
 #include <QCursor>
 #include <QEvent>
 #include <QHeaderView>
@@ -16,7 +17,6 @@
 #include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
-#include <QToolButton>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 
@@ -43,6 +43,30 @@ QVector<EntrySummary> parseSummaries(const QCborArray &items) {
     return entries;
 }
 
+int searchModeComboIndex(SearchMode mode) {
+    switch (mode) {
+        case SearchMode::Regex:
+            return 1;
+        case SearchMode::Advanced:
+            return 2;
+        case SearchMode::Plain:
+        default:
+            return 0;
+    }
+}
+
+SearchMode searchModeFromComboIndex(int index) {
+    switch (index) {
+        case 1:
+            return SearchMode::Regex;
+        case 2:
+            return SearchMode::Advanced;
+        case 0:
+        default:
+            return SearchMode::Plain;
+    }
+}
+
 }  // namespace
 
 QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
@@ -55,27 +79,12 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     auto *searchRow = new QHBoxLayout();
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(QStringLiteral("Type to search clipboard history..."));
-    auto *modeWidget = new QWidget(this);
-    auto *modeLayout = new QHBoxLayout(modeWidget);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(2);
-
-    m_plainModeButton = new QToolButton(modeWidget);
-    m_plainModeButton->setText(QStringLiteral("Plain"));
-    m_plainModeButton->setCheckable(true);
-    m_plainModeButton->setAutoExclusive(true);
-    m_regexModeButton = new QToolButton(modeWidget);
-    m_regexModeButton->setText(QStringLiteral("Regex"));
-    m_regexModeButton->setCheckable(true);
-    m_regexModeButton->setAutoExclusive(true);
-    m_advancedModeButton = new QToolButton(modeWidget);
-    m_advancedModeButton->setText(QStringLiteral("Advanced"));
-    m_advancedModeButton->setCheckable(true);
-    m_advancedModeButton->setAutoExclusive(true);
-
-    modeLayout->addWidget(m_plainModeButton);
-    modeLayout->addWidget(m_regexModeButton);
-    modeLayout->addWidget(m_advancedModeButton);
+    m_searchModeCombo = new QComboBox(this);
+    m_searchModeCombo->addItem(QStringLiteral("Plain"), searchModeToString(SearchMode::Plain));
+    m_searchModeCombo->addItem(QStringLiteral("Regex"), searchModeToString(SearchMode::Regex));
+    m_searchModeCombo->addItem(QStringLiteral("Advanced"),
+                               searchModeToString(SearchMode::Advanced));
+    m_searchModeCombo->setToolTip(QStringLiteral("Search mode"));
 
     m_searchErrorLabel = new QLabel(this);
     m_searchErrorLabel->setStyleSheet(QStringLiteral("color: #b3412f;"));
@@ -104,7 +113,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
     m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
     searchRow->addWidget(m_searchEdit, 1);
-    searchRow->addWidget(modeWidget);
+    searchRow->addWidget(m_searchModeCombo);
     layout->addLayout(searchRow);
     layout->addWidget(m_searchErrorLabel);
     layout->addWidget(m_table);
@@ -131,20 +140,12 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
             [this] { activateCurrent(); });
     connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
             this, &QuickPasteDialog::showHeaderContextMenu);
-    connect(m_plainModeButton, &QToolButton::clicked, this, [this] {
-        setSearchMode(SearchMode::Plain);
-        emit searchModeChanged(searchModeToString(m_searchMode));
-    });
-    connect(m_regexModeButton, &QToolButton::clicked, this, [this] {
-        setSearchMode(SearchMode::Regex);
-        emit searchModeChanged(searchModeToString(m_searchMode));
-    });
-    connect(m_advancedModeButton, &QToolButton::clicked, this, [this] {
-        setSearchMode(SearchMode::Advanced);
+    connect(m_searchModeCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        setSearchMode(searchModeFromComboIndex(index));
         emit searchModeChanged(searchModeToString(m_searchMode));
     });
 
-    applySearchModeButtons();
+    syncSearchModeCombo();
     applyTableLayout();
 }
 
@@ -167,7 +168,7 @@ void QuickPasteDialog::setSearchMode(SearchMode mode) {
         return;
     }
     m_searchMode = mode;
-    applySearchModeButtons();
+    syncSearchModeCombo();
     if (isVisible()) {
         refreshResults();
     }
@@ -336,14 +337,19 @@ void QuickPasteDialog::setSearchError(const QString &message) {
     m_searchErrorLabel->setText(trimmed);
 }
 
-void QuickPasteDialog::applySearchModeButtons() {
-    if (!m_plainModeButton || !m_regexModeButton || !m_advancedModeButton) {
+void QuickPasteDialog::syncSearchModeCombo() {
+    if (!m_searchModeCombo) {
         return;
     }
 
-    m_plainModeButton->setChecked(m_searchMode == SearchMode::Plain);
-    m_regexModeButton->setChecked(m_searchMode == SearchMode::Regex);
-    m_advancedModeButton->setChecked(m_searchMode == SearchMode::Advanced);
+    const int targetIndex = searchModeComboIndex(m_searchMode);
+    if (m_searchModeCombo->currentIndex() == targetIndex) {
+        return;
+    }
+
+    m_searchModeCombo->blockSignals(true);
+    m_searchModeCombo->setCurrentIndex(targetIndex);
+    m_searchModeCombo->blockSignals(false);
 }
 
 void QuickPasteDialog::showHeaderContextMenu(const QPoint &position) {

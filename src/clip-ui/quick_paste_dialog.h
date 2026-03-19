@@ -12,7 +12,7 @@ class QTableView;
 class QTimer;
 class QHideEvent;
 class QLabel;
-class QToolButton;
+class QComboBox;
 
 namespace pastetry {
 
@@ -52,14 +52,12 @@ private:
     void applyTableLayout();
     void showHeaderContextMenu(const QPoint &position);
     void setSearchError(const QString &message);
-    void applySearchModeButtons();
+    void syncSearchModeCombo();
 
     IpcClient m_client;
     HistoryModel *m_model = nullptr;
     QLineEdit *m_searchEdit = nullptr;
-    QToolButton *m_plainModeButton = nullptr;
-    QToolButton *m_regexModeButton = nullptr;
-    QToolButton *m_advancedModeButton = nullptr;
+    QComboBox *m_searchModeCombo = nullptr;
     QLabel *m_searchErrorLabel = nullptr;
     QTableView *m_table = nullptr;
     PreviewTextDelegate *m_previewDelegate = nullptr;
