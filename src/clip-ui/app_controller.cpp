@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QPointer>
 #include <QStyle>
 #include <QSystemTrayIcon>
 
@@ -508,11 +509,313 @@ bool qtKeyToX11KeySym(int qtKey, KeySym *outSym) {
 }
 #endif
 
+class ShortcutServiceAdapter final : public IShortcutService {
+    Q_OBJECT
+
+public:
+    ShortcutServiceAdapter(QObject *parent, int windowsHotkeyId)
+        : IShortcutService(parent), m_impl(this, windowsHotkeyId) {
+        connect(&m_impl, &GlobalShortcutService::activated, this,
+                &IShortcutService::activated);
+    }
+
+    ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
+                                               bool requireModifier) override {
+        return m_impl.registerShortcut(sequence, requireModifier);
+    }
+
+    void unregisterShortcut() override {
+        m_impl.unregisterShortcut();
+    }
+
+    QString lastError() const override {
+        return m_impl.lastError();
+    }
+
+private:
+    GlobalShortcutService m_impl;
+};
+
+class DefaultShortcutServiceFactory final : public IShortcutServiceFactory {
+public:
+    IShortcutService *create(QObject *parent, int windowsHotkeyId) override {
+        return new ShortcutServiceAdapter(parent, windowsHotkeyId);
+    }
+};
+
+class DefaultSingleInstanceController final : public ISingleInstanceController {
+public:
+    bool notifyExistingInstance(const QString &instanceName, int timeoutMs,
+                                QString *error) override {
+        QLocalSocket socket;
+        socket.connectToServer(instanceName);
+        if (!socket.waitForConnected(timeoutMs)) {
+            if (error) {
+                *error = socket.errorString();
+            }
+            return false;
+        }
+
+        if (socket.write("toggle-popup\n") < 0 || !socket.waitForBytesWritten(timeoutMs)) {
+            if (error) {
+                *error = socket.errorString();
+            }
+            socket.disconnectFromServer();
+            return false;
+        }
+
+        socket.disconnectFromServer();
+        if (error) {
+            error->clear();
+        }
+        return true;
+    }
+
+    bool hasLikelyPeerUiProcess(qint64 selfPid, const QString &executableName,
+                                QString *detail) const override {
+        if (executableName.trimmed().isEmpty()) {
+            if (detail) {
+                *detail = QStringLiteral("Unable to determine current executable name");
+            }
+            return true;
+        }
+
+#ifdef Q_OS_WIN
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE) {
+            if (detail) {
+                *detail = QStringLiteral("Process probe unavailable (snapshot failed)");
+            }
+            return true;
+        }
+
+        PROCESSENTRY32W entry;
+        entry.dwSize = sizeof(entry);
+        QVector<qint64> peerPids;
+        const QString targetLower = executableName.toLower();
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                const qint64 pid = static_cast<qint64>(entry.th32ProcessID);
+                if (pid == selfPid) {
+                    continue;
+                }
+
+                const QString candidate =
+                    QString::fromWCharArray(entry.szExeFile).trimmed().toLower();
+                if (candidate == targetLower) {
+                    peerPids.push_back(pid);
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+
+        if (peerPids.isEmpty()) {
+            if (detail) {
+                *detail = QStringLiteral("No peer UI process found");
+            }
+            return false;
+        }
+
+        if (detail) {
+            QStringList pidStrings;
+            for (qint64 pid : peerPids) {
+                pidStrings.push_back(QString::number(pid));
+            }
+            *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
+        }
+        return true;
+#else
+        QProcess ps;
+        ps.start(QStringLiteral("ps"),
+                 QStringList{QStringLiteral("-eo"), QStringLiteral("pid=,args=")});
+        if (!ps.waitForStarted(1000)) {
+            if (detail) {
+                *detail = QStringLiteral("Process probe unavailable (ps did not start)");
+            }
+            return true;
+        }
+        if (!ps.waitForFinished(2000)) {
+            ps.kill();
+            ps.waitForFinished(500);
+            if (detail) {
+                *detail = QStringLiteral("Process probe unavailable (ps timed out)");
+            }
+            return true;
+        }
+
+        QVector<qint64> peerPids;
+        const QString output = QString::fromUtf8(ps.readAllStandardOutput());
+        for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+            const QString trimmed = line.trimmed();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+
+            const int firstSpace = trimmed.indexOf(' ');
+            if (firstSpace <= 0) {
+                continue;
+            }
+
+            bool ok = false;
+            const qint64 pid = trimmed.left(firstSpace).toLongLong(&ok);
+            if (!ok || pid == selfPid) {
+                continue;
+            }
+
+            const QString args = trimmed.mid(firstSpace + 1).trimmed();
+            if (args.isEmpty()) {
+                continue;
+            }
+
+            const QString commandToken = args.section(' ', 0, 0);
+            const QString commandName = QFileInfo(commandToken).fileName();
+            if (commandName == executableName) {
+                peerPids.push_back(pid);
+            }
+        }
+
+        if (peerPids.isEmpty()) {
+            if (detail) {
+                *detail = QStringLiteral("No peer UI process found");
+            }
+            return false;
+        }
+
+        if (detail) {
+            QStringList pidStrings;
+            for (qint64 pid : peerPids) {
+                pidStrings.push_back(QString::number(pid));
+            }
+            *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
+        }
+        return true;
+#endif
+    }
+
+    SingleInstanceStartResult startServer(
+        const QString &instanceName, QObject *owner,
+        const std::function<void(const QString &command)> &commandHandler,
+        QString *error) override {
+        if (!m_server) {
+            m_server = new QLocalServer(owner);
+            QObject::connect(m_server, &QObject::destroyed, owner, [this] {
+                m_server = nullptr;
+                m_connected = false;
+            });
+        }
+
+        if (m_server->isListening()) {
+            return SingleInstanceStartResult::Started;
+        }
+
+        if (!m_server->listen(instanceName)) {
+            if (error) {
+                *error = m_server->errorString();
+            }
+            return m_server->serverError() == QAbstractSocket::AddressInUseError
+                       ? SingleInstanceStartResult::AddressInUse
+                       : SingleInstanceStartResult::Failed;
+        }
+
+        m_commandHandler = commandHandler;
+        if (!m_connected) {
+            QObject::connect(m_server, &QLocalServer::newConnection, owner, [this] {
+                if (!m_server) {
+                    return;
+                }
+                while (m_server->hasPendingConnections()) {
+                    QLocalSocket *socket = m_server->nextPendingConnection();
+                    QObject::connect(socket, &QLocalSocket::readyRead, socket, [this, socket] {
+                        const QString command = QString::fromUtf8(socket->readAll()).trimmed();
+                        if (!command.isEmpty() && m_commandHandler) {
+                            m_commandHandler(command);
+                        }
+                    });
+                    QObject::connect(socket, &QLocalSocket::disconnected, socket,
+                                     &QLocalSocket::deleteLater);
+                }
+            });
+            m_connected = true;
+        }
+
+        if (error) {
+            error->clear();
+        }
+        return SingleInstanceStartResult::Started;
+    }
+
+    void removeServer(const QString &instanceName) override {
+        QLocalServer::removeServer(instanceName);
+        if (m_server && m_server->isListening()) {
+            m_server->close();
+        }
+    }
+
+private:
+    QPointer<QLocalServer> m_server;
+    bool m_connected = false;
+    std::function<void(const QString &)> m_commandHandler;
+};
+
+class DefaultUserInteraction final : public IUserInteraction {
+public:
+    TakeoverPromptChoice promptSingleInstanceTakeover(QWidget *parent,
+                                                      const QString &detail) override {
+        QMessageBox dialog(parent);
+        dialog.setIcon(QMessageBox::Warning);
+        dialog.setWindowTitle(QStringLiteral("Pastetry instance conflict"));
+        dialog.setText(QStringLiteral(
+            "Pastetry detected an in-use instance socket but could not hand off to the existing UI."));
+        dialog.setInformativeText(
+            QStringLiteral("Retry handoff, take over the stale socket, or exit this launch.\n\n"
+                           "Last probe detail: %1")
+                .arg(detail.trimmed().isEmpty() ? QStringLiteral("Unknown error")
+                                                : detail));
+
+        QPushButton *retryButton =
+            dialog.addButton(QStringLiteral("Retry handoff"), QMessageBox::AcceptRole);
+        QPushButton *takeOverButton =
+            dialog.addButton(QStringLiteral("Take over"), QMessageBox::DestructiveRole);
+        QPushButton *exitButton = dialog.addButton(QStringLiteral("Exit"), QMessageBox::RejectRole);
+
+        dialog.setDefaultButton(exitButton);
+        dialog.exec();
+
+        if (dialog.clickedButton() == retryButton) {
+            return TakeoverPromptChoice::RetryHandoff;
+        }
+        if (dialog.clickedButton() == takeOverButton) {
+            return TakeoverPromptChoice::TakeOver;
+        }
+        return TakeoverPromptChoice::Exit;
+    }
+
+    void showWarning(QWidget *parent, const QString &title,
+                     const QString &message) override {
+        QMessageBox::warning(parent, title, message);
+    }
+};
+
 }  // namespace
 
 AppController::AppController(AppPaths paths, QObject *parent)
+    : AppController(std::move(paths), std::make_unique<DefaultSingleInstanceController>(),
+                    std::make_unique<DefaultShortcutServiceFactory>(),
+                    std::make_unique<DefaultUserInteraction>(), parent) {}
+
+AppController::AppController(
+    AppPaths paths, std::unique_ptr<ISingleInstanceController> singleInstanceController,
+    std::unique_ptr<IShortcutServiceFactory> shortcutFactory,
+    std::unique_ptr<IUserInteraction> userInteraction, QObject *parent)
     : QObject(parent),
       m_paths(std::move(paths)),
+      m_singleInstanceController(
+          singleInstanceController ? std::move(singleInstanceController)
+                                   : std::make_unique<DefaultSingleInstanceController>()),
+      m_shortcutFactory(shortcutFactory ? std::move(shortcutFactory)
+                                        : std::make_unique<DefaultShortcutServiceFactory>()),
+      m_userInteraction(userInteraction ? std::move(userInteraction)
+                                        : std::make_unique<DefaultUserInteraction>()),
       m_ipcRunner(m_paths.socketName, this),
       m_mainWindow(&m_ipcRunner),
       m_quickPasteDialog(&m_ipcRunner),
@@ -616,8 +919,7 @@ bool AppController::initialize(QString *error) {
     }
 
     if (!startSingleInstanceServer(error)) {
-        if (!m_singleInstanceServer ||
-            m_singleInstanceServer->serverError() != QAbstractSocket::AddressInUseError) {
+        if (!m_lastSingleInstanceAddressInUse) {
             return false;
         }
 
@@ -638,7 +940,9 @@ bool AppController::initialize(QString *error) {
                             processProbeDetail.trimmed().isEmpty()
                                 ? QStringLiteral("No peer process detected")
                                 : processProbeDetail.trimmed());
-            QLocalServer::removeServer(m_singleInstanceName);
+            if (m_singleInstanceController) {
+                m_singleInstanceController->removeServer(m_singleInstanceName);
+            }
             if (!startSingleInstanceServer(error)) {
                 return false;
             }
@@ -651,16 +955,16 @@ bool AppController::initialize(QString *error) {
             }
 
             while (true) {
-                const InstanceTakeoverDecision decision =
+                const TakeoverPromptChoice decision =
                     promptSingleInstanceTakeover(handoffError);
-                if (decision == InstanceTakeoverDecision::Exit) {
+                if (decision == TakeoverPromptChoice::Exit) {
                     if (error) {
                         error->clear();
                     }
                     return false;
                 }
 
-                if (decision == InstanceTakeoverDecision::RetryHandoff) {
+                if (decision == TakeoverPromptChoice::RetryHandoff) {
                     handoffError.clear();
                     if (notifyExistingInstance(300, &handoffError)) {
                         return false;
@@ -668,7 +972,9 @@ bool AppController::initialize(QString *error) {
                     continue;
                 }
 
-                QLocalServer::removeServer(m_singleInstanceName);
+                if (m_singleInstanceController) {
+                    m_singleInstanceController->removeServer(m_singleInstanceName);
+                }
                 if (!startSingleInstanceServer(error)) {
                     return false;
                 }
@@ -1081,220 +1387,52 @@ void AppController::handleQuitRequested() {
 }
 
 bool AppController::notifyExistingInstance(int timeoutMs, QString *error) {
-    QLocalSocket socket;
-    socket.connectToServer(m_singleInstanceName);
-    if (!socket.waitForConnected(timeoutMs)) {
+    if (!m_singleInstanceController) {
         if (error) {
-            *error = socket.errorString();
+            *error = QStringLiteral("Single-instance controller unavailable");
         }
         return false;
     }
-
-    if (socket.write("toggle-popup\n") < 0 || !socket.waitForBytesWritten(timeoutMs)) {
-        if (error) {
-            *error = socket.errorString();
-        }
-        socket.disconnectFromServer();
-        return false;
-    }
-
-    socket.disconnectFromServer();
-    if (error) {
-        error->clear();
-    }
-    return true;
+    return m_singleInstanceController->notifyExistingInstance(m_singleInstanceName, timeoutMs,
+                                                              error);
 }
 
 bool AppController::hasLikelyPeerUiProcess(QString *detail) const {
+    if (!m_singleInstanceController) {
+        if (detail) {
+            *detail = QStringLiteral("Single-instance controller unavailable");
+        }
+        return true;
+    }
+
     const qint64 selfPid = QCoreApplication::applicationPid();
     const QString executableName =
         QFileInfo(QCoreApplication::applicationFilePath()).fileName();
-    if (executableName.trimmed().isEmpty()) {
-        if (detail) {
-            *detail = QStringLiteral("Unable to determine current executable name");
-        }
-        return true;
-    }
-
-#ifdef Q_OS_WIN
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        if (detail) {
-            *detail = QStringLiteral("Process probe unavailable (snapshot failed)");
-        }
-        return true;
-    }
-
-    PROCESSENTRY32W entry;
-    entry.dwSize = sizeof(entry);
-    QVector<qint64> peerPids;
-    const QString targetLower = executableName.toLower();
-    if (Process32FirstW(snapshot, &entry)) {
-        do {
-            const qint64 pid = static_cast<qint64>(entry.th32ProcessID);
-            if (pid == selfPid) {
-                continue;
-            }
-
-            const QString candidate =
-                QString::fromWCharArray(entry.szExeFile).trimmed().toLower();
-            if (candidate == targetLower) {
-                peerPids.push_back(pid);
-            }
-        } while (Process32NextW(snapshot, &entry));
-    }
-    CloseHandle(snapshot);
-
-    if (peerPids.isEmpty()) {
-        if (detail) {
-            *detail = QStringLiteral("No peer UI process found");
-        }
-        return false;
-    }
-
-    if (detail) {
-        QStringList pidStrings;
-        for (qint64 pid : peerPids) {
-            pidStrings.push_back(QString::number(pid));
-        }
-        *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
-    }
-    return true;
-#else
-    QProcess ps;
-    ps.start(QStringLiteral("ps"),
-             QStringList{QStringLiteral("-eo"), QStringLiteral("pid=,args=")});
-    if (!ps.waitForStarted(1000)) {
-        if (detail) {
-            *detail = QStringLiteral("Process probe unavailable (ps did not start)");
-        }
-        return true;
-    }
-    if (!ps.waitForFinished(2000)) {
-        ps.kill();
-        ps.waitForFinished(500);
-        if (detail) {
-            *detail = QStringLiteral("Process probe unavailable (ps timed out)");
-        }
-        return true;
-    }
-
-    QVector<qint64> peerPids;
-    const QString output = QString::fromUtf8(ps.readAllStandardOutput());
-    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty()) {
-            continue;
-        }
-
-        const int firstSpace = trimmed.indexOf(' ');
-        if (firstSpace <= 0) {
-            continue;
-        }
-
-        bool ok = false;
-        const qint64 pid = trimmed.left(firstSpace).toLongLong(&ok);
-        if (!ok || pid == selfPid) {
-            continue;
-        }
-
-        const QString args = trimmed.mid(firstSpace + 1).trimmed();
-        if (args.isEmpty()) {
-            continue;
-        }
-
-        const QString commandToken = args.section(' ', 0, 0);
-        const QString commandName = QFileInfo(commandToken).fileName();
-        if (commandName == executableName) {
-            peerPids.push_back(pid);
-        }
-    }
-
-    if (peerPids.isEmpty()) {
-        if (detail) {
-            *detail = QStringLiteral("No peer UI process found");
-        }
-        return false;
-    }
-
-    if (detail) {
-        QStringList pidStrings;
-        for (qint64 pid : peerPids) {
-            pidStrings.push_back(QString::number(pid));
-        }
-        *detail = QStringLiteral("Found peer UI process PID(s): %1").arg(pidStrings.join(", "));
-    }
-    return true;
-#endif
+    return m_singleInstanceController->hasLikelyPeerUiProcess(selfPid, executableName, detail);
 }
 
 bool AppController::startSingleInstanceServer(QString *error) {
-    if (!m_singleInstanceServer) {
-        m_singleInstanceServer = new QLocalServer(this);
-    }
-
-    if (m_singleInstanceServer->isListening()) {
-        return true;
-    }
-
-    if (!m_singleInstanceServer->listen(m_singleInstanceName)) {
+    if (!m_singleInstanceController) {
         if (error) {
-            *error = m_singleInstanceServer->errorString();
+            *error = QStringLiteral("Single-instance controller unavailable");
         }
         return false;
     }
 
-    connect(m_singleInstanceServer, &QLocalServer::newConnection, this,
-            &AppController::handleSingleInstanceNewConnection, Qt::UniqueConnection);
-
-    return true;
+    const SingleInstanceStartResult startResult =
+        m_singleInstanceController->startServer(
+            m_singleInstanceName, this,
+            [this](const QString &command) { handleSingleInstanceCommand(command); }, error);
+    m_lastSingleInstanceAddressInUse =
+        startResult == SingleInstanceStartResult::AddressInUse;
+    return startResult == SingleInstanceStartResult::Started;
 }
 
-AppController::InstanceTakeoverDecision
-AppController::promptSingleInstanceTakeover(const QString &detail) {
-    QMessageBox dialog(&m_mainWindow);
-    dialog.setIcon(QMessageBox::Warning);
-    dialog.setWindowTitle(QStringLiteral("Pastetry instance conflict"));
-    dialog.setText(QStringLiteral(
-        "Pastetry detected an in-use instance socket but could not hand off to the existing UI."));
-    dialog.setInformativeText(
-        QStringLiteral("Retry handoff, take over the stale socket, or exit this launch.\n\n"
-                       "Last probe detail: %1")
-            .arg(detail.trimmed().isEmpty() ? QStringLiteral("Unknown error") : detail));
-
-    QPushButton *retryButton =
-        dialog.addButton(QStringLiteral("Retry handoff"), QMessageBox::AcceptRole);
-    QPushButton *takeOverButton =
-        dialog.addButton(QStringLiteral("Take over"), QMessageBox::DestructiveRole);
-    QPushButton *exitButton = dialog.addButton(QStringLiteral("Exit"), QMessageBox::RejectRole);
-
-    dialog.setDefaultButton(exitButton);
-    dialog.exec();
-
-    if (dialog.clickedButton() == retryButton) {
-        return InstanceTakeoverDecision::RetryHandoff;
+TakeoverPromptChoice AppController::promptSingleInstanceTakeover(const QString &detail) {
+    if (!m_userInteraction) {
+        return TakeoverPromptChoice::Exit;
     }
-    if (dialog.clickedButton() == takeOverButton) {
-        return InstanceTakeoverDecision::TakeOver;
-    }
-    return InstanceTakeoverDecision::Exit;
-}
-
-void AppController::handleSingleInstanceNewConnection() {
-    if (!m_singleInstanceServer) {
-        return;
-    }
-
-    while (m_singleInstanceServer->hasPendingConnections()) {
-        QLocalSocket *socket = m_singleInstanceServer->nextPendingConnection();
-        connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
-            const QString command = QString::fromUtf8(socket->readAll()).trimmed();
-            if (!command.isEmpty()) {
-                handleSingleInstanceCommand(command);
-            }
-        });
-        connect(socket, &QLocalSocket::disconnected, socket, &QLocalSocket::deleteLater);
-    }
+    return m_userInteraction->promptSingleInstanceTakeover(&m_mainWindow, detail);
 }
 
 void AppController::handleSingleInstanceCommand(const QString &command) {
@@ -1504,7 +1642,7 @@ void AppController::saveSettings() {
 }
 
 void AppController::clearShortcutRegistrations() {
-    for (GlobalShortcutService *service : m_baseShortcutServices) {
+    for (IShortcutService *service : m_baseShortcutServices) {
         if (!service) {
             continue;
         }
@@ -1519,7 +1657,7 @@ void AppController::clearShortcutRegistrations() {
 
 void AppController::clearChordCaptureRegistrations() {
     m_chordTimeoutTimer.stop();
-    for (GlobalShortcutService *service : m_chordSecondShortcutServices) {
+    for (IShortcutService *service : m_chordSecondShortcutServices) {
         if (!service) {
             continue;
         }
@@ -1576,7 +1714,17 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
         const QString actionId = it.value();
         const ShortcutBindingConfig binding = m_shortcutBindings.value(actionId);
 
-        auto *service = new GlobalShortcutService(this, m_nextHotkeyId++);
+        if (!m_shortcutFactory) {
+            m_shortcutStates[actionId] = ShortcutRegistrationState::Unavailable;
+            m_shortcutErrors[actionId] = QStringLiteral("Shortcut service factory unavailable");
+            continue;
+        }
+        IShortcutService *service = m_shortcutFactory->create(this, m_nextHotkeyId++);
+        if (!service) {
+            m_shortcutStates[actionId] = ShortcutRegistrationState::Unavailable;
+            m_shortcutErrors[actionId] = QStringLiteral("Shortcut service unavailable");
+            continue;
+        }
         const ShortcutRegistrationState state =
             service->registerShortcut(binding.directSequence, true);
         const QString detail = service->lastError();
@@ -1585,7 +1733,7 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
         m_shortcutErrors[actionId] = detail;
 
         if (state == ShortcutRegistrationState::Registered) {
-            connect(service, &GlobalShortcutService::activated, this,
+            connect(service, &IShortcutService::activated, this,
                     [this, actionId] { handleShortcutAction(actionId); });
             m_baseShortcutServices.push_back(service);
             m_serviceToDirectAction.insert(service, actionId);
@@ -1611,7 +1759,22 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
 
         const ShortcutBindingConfig binding =
             m_shortcutBindings.value(actions.first());
-        auto *service = new GlobalShortcutService(this, m_nextHotkeyId++);
+        if (!m_shortcutFactory) {
+            for (const QString &actionId : actions) {
+                m_shortcutStates[actionId] = ShortcutRegistrationState::Unavailable;
+                m_shortcutErrors[actionId] =
+                    QStringLiteral("Shortcut service factory unavailable");
+            }
+            continue;
+        }
+        IShortcutService *service = m_shortcutFactory->create(this, m_nextHotkeyId++);
+        if (!service) {
+            for (const QString &actionId : actions) {
+                m_shortcutStates[actionId] = ShortcutRegistrationState::Unavailable;
+                m_shortcutErrors[actionId] = QStringLiteral("Shortcut service unavailable");
+            }
+            continue;
+        }
         const ShortcutRegistrationState state =
             service->registerShortcut(binding.chordFirstSequence, true);
         const QString detail = service->lastError();
@@ -1622,7 +1785,7 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
         }
 
         if (state == ShortcutRegistrationState::Registered) {
-            connect(service, &GlobalShortcutService::activated, this,
+            connect(service, &IShortcutService::activated, this,
                     [this, firstKey = it.key()] { beginChordCapture(firstKey); });
             m_baseShortcutServices.push_back(service);
             m_serviceToChordFirstKey.insert(service, it.key());
@@ -1661,12 +1824,20 @@ void AppController::beginChordCapture(const QString &firstKeyPortable) {
 
     for (const QString &actionId : actions) {
         const ShortcutBindingConfig binding = m_shortcutBindings.value(actionId);
-        auto *service = new GlobalShortcutService(this, m_nextHotkeyId++);
+        if (!m_shortcutFactory) {
+            m_shortcutErrors[actionId] = QStringLiteral("Shortcut service factory unavailable");
+            continue;
+        }
+        IShortcutService *service = m_shortcutFactory->create(this, m_nextHotkeyId++);
+        if (!service) {
+            m_shortcutErrors[actionId] = QStringLiteral("Shortcut service unavailable");
+            continue;
+        }
         const ShortcutRegistrationState state =
             service->registerShortcut(binding.chordSecondSequence, false);
 
         if (state == ShortcutRegistrationState::Registered) {
-            connect(service, &GlobalShortcutService::activated, this,
+            connect(service, &IShortcutService::activated, this,
                     [this, actionId] {
                         handleShortcutAction(actionId);
                         endChordCapture();
@@ -1930,7 +2101,11 @@ void AppController::notifyShortcutWarning(const QString &title,
         m_trayIcon->showMessage(title, message, QSystemTrayIcon::Warning, 3500);
         return;
     }
-    QMessageBox::warning(&m_mainWindow, title, message);
+    if (m_userInteraction) {
+        m_userInteraction->showWarning(&m_mainWindow, title, message);
+    } else {
+        QMessageBox::warning(&m_mainWindow, title, message);
+    }
 }
 
 void AppController::checkDaemonConnectivity(bool notifyIfUnavailable) {
@@ -2078,3 +2253,5 @@ QVector<bool> AppController::normalizedColumns(const QVector<bool> &columns) con
 }
 
 }  // namespace pastetry
+
+#include "app_controller.moc"

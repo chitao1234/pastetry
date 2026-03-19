@@ -24,17 +24,25 @@ qint64 IpcAsyncRunner::request(
     const QString socketName = m_socketName;
     const QString requestMethod = method;
     const QCborMap requestParams = params;
+    const QPointer<IpcAsyncRunner> self(this);
 
     QThreadPool::globalInstance()->start(
-        [this, requestId, socketName, requestMethod, requestParams, timeoutMs] {
+        [self, requestId, socketName, requestMethod, requestParams, timeoutMs] {
             IpcClient client(socketName);
             QString error;
             QCborMap result = client.request(requestMethod, requestParams, timeoutMs, &error);
 
+            if (!self) {
+                return;
+            }
+
             QMetaObject::invokeMethod(
-                this,
-                [this, requestId, result = std::move(result), error = std::move(error)]() mutable {
-                    finishRequest(requestId, std::move(result), std::move(error));
+                self,
+                [self, requestId, result = std::move(result), error = std::move(error)]() mutable {
+                    if (!self) {
+                        return;
+                    }
+                    self->finishRequest(requestId, std::move(result), std::move(error));
                 },
                 Qt::QueuedConnection);
         });

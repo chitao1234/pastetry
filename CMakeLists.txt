@@ -35,12 +35,11 @@ add_executable(pastetry-clipd
 
 target_link_libraries(pastetry-clipd PRIVATE pastetry_common)
 
-add_executable(pastetry-clip-ui
+add_library(pastetry_ui
     src/clip-ui/app_controller.cpp
     src/clip-ui/clipboard_inspector_dialog.cpp
     src/clip-ui/global_shortcut_service.cpp
     src/clip-ui/ipc_async_runner.cpp
-    src/clip-ui/main.cpp
     src/clip-ui/history_model.cpp
     src/clip-ui/main_window.cpp
     src/clip-ui/preview_text_delegate.cpp
@@ -49,21 +48,27 @@ add_executable(pastetry-clip-ui
     src/clip-ui/settings_dialog.cpp
 )
 
-target_link_libraries(pastetry-clip-ui
-    PRIVATE
+target_link_libraries(pastetry_ui
+    PUBLIC
         pastetry_common
         Qt6::Widgets
 )
 
 if(UNIX AND NOT APPLE)
     find_package(X11 REQUIRED)
-    target_include_directories(pastetry-clip-ui PRIVATE ${X11_INCLUDE_DIR})
-    target_link_libraries(pastetry-clip-ui PRIVATE ${X11_LIBRARIES})
+    target_include_directories(pastetry_ui PRIVATE ${X11_INCLUDE_DIR})
+    target_link_libraries(pastetry_ui PRIVATE ${X11_LIBRARIES})
     if(X11_XTest_FOUND)
-        target_link_libraries(pastetry-clip-ui PRIVATE ${X11_XTest_LIB})
-        target_compile_definitions(pastetry-clip-ui PRIVATE PASTETRY_HAVE_XTEST=1)
+        target_link_libraries(pastetry_ui PRIVATE ${X11_XTest_LIB})
+        target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_XTEST=1)
     endif()
 endif()
+
+add_executable(pastetry-clip-ui
+    src/clip-ui/main.cpp
+)
+
+target_link_libraries(pastetry-clip-ui PRIVATE pastetry_ui)
 
 enable_testing()
 add_executable(repository_tests
@@ -73,3 +78,29 @@ add_executable(repository_tests
 target_link_libraries(repository_tests PRIVATE pastetry_common Qt6::Test)
 
 add_test(NAME repository_tests COMMAND repository_tests)
+
+add_executable(app_controller_integration_tests
+    tests/app_controller_integration_tests.cpp
+)
+target_link_libraries(app_controller_integration_tests
+    PRIVATE
+        pastetry_ui
+        Qt6::Test
+)
+add_test(NAME app_controller_integration_tests COMMAND app_controller_integration_tests)
+set_tests_properties(app_controller_integration_tests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
+add_executable(quick_paste_dialog_tests
+    tests/quick_paste_dialog_tests.cpp
+)
+target_link_libraries(quick_paste_dialog_tests
+    PRIVATE
+        pastetry_ui
+        Qt6::Test
+)
+add_test(NAME quick_paste_dialog_tests COMMAND quick_paste_dialog_tests)
+set_tests_properties(quick_paste_dialog_tests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)

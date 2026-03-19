@@ -1,5 +1,6 @@
 #include "common/clipboard_repository.h"
 
+#include <QFile>
 #include <QTemporaryDir>
 #include <QtTest/QtTest>
 
@@ -18,6 +19,8 @@ private slots:
     void preservesFormatInsertionOrder();
     void persistsCapturePolicy();
     void clearHistoryKeepsPinnedWhenRequested();
+    void clearHistoryKeepPinnedRetainsSharedBlob();
+    void deleteEntryRollbackWhenBlobRemovalFails();
     void pinnedOrderMoveAndRepin();
     void resolvesRecentNonPinnedSlots();
 };
@@ -427,6 +430,105 @@ void RepositoryTests::clearHistoryKeepsPinnedWhenRequested() {
     SearchResult emptyResult = repo.searchEntries(afterKeepPinned, &error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QVERIFY(emptyResult.entries.isEmpty());
+}
+
+void RepositoryTests::clearHistoryKeepPinnedRetainsSharedBlob() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-clear-history-shared-blob");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry pinned;
+    pinned.sourceApp = QStringLiteral("shared-blob");
+    pinned.preview = QStringLiteral("shared-data");
+    pinned.formats = {CapturedFormat{"text/plain", QByteArray("shared-payload")}};
+    const qint64 pinnedId = repo.insertEntry(pinned, &error);
+    QVERIFY2(pinnedId > 0, qPrintable(error));
+    QVERIFY2(repo.setPinned(pinnedId, true, &error), qPrintable(error));
+
+    CapturedEntry unpinned;
+    unpinned.sourceApp = QStringLiteral("shared-blob");
+    unpinned.preview = QStringLiteral("shared-data-unpinned");
+    unpinned.formats = {CapturedFormat{"text/plain", QByteArray("shared-payload")}};
+    const qint64 unpinnedId = repo.insertEntry(unpinned, &error);
+    QVERIFY2(unpinnedId > 0, qPrintable(error));
+
+    const EntryDetail pinnedBeforeClear = repo.getEntryDetail(pinnedId, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(pinnedBeforeClear.formats.size(), 1);
+    const QString sharedBlobHash = pinnedBeforeClear.formats.first().blobHash;
+    QVERIFY(!sharedBlobHash.isEmpty());
+
+    QVERIFY2(repo.clearHistory(true, &error), qPrintable(error));
+
+    EntryDetail pinnedAfterClear = repo.getEntryDetail(pinnedId, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(pinnedAfterClear.id, pinnedId);
+    QVERIFY(pinnedAfterClear.pinned);
+    QCOMPARE(pinnedAfterClear.formats.size(), 1);
+    QCOMPARE(pinnedAfterClear.formats.first().blobHash, sharedBlobHash);
+
+    const QByteArray blobPayload = repo.loadBlob(sharedBlobHash, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(blobPayload, QByteArray("shared-payload"));
+
+    error.clear();
+    const EntryDetail removed = repo.getEntryDetail(unpinnedId, &error);
+    QCOMPARE(removed.id, qint64(0));
+    QVERIFY(!error.isEmpty());
+}
+
+void RepositoryTests::deleteEntryRollbackWhenBlobRemovalFails() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+
+    ClipboardRepository repo(dir.filePath("history.sqlite3"), dir.filePath("blobs"),
+                             "test-delete-rollback");
+
+    QString error;
+    QVERIFY2(repo.open(&error), qPrintable(error));
+    QVERIFY2(repo.initialize(&error), qPrintable(error));
+
+    CapturedEntry entry;
+    entry.sourceApp = QStringLiteral("rollback");
+    entry.preview = QStringLiteral("blob rollback test");
+    entry.formats = {CapturedFormat{"text/plain", QByteArray("blob-rollback-data")}};
+
+    const qint64 entryId = repo.insertEntry(entry, &error);
+    QVERIFY2(entryId > 0, qPrintable(error));
+
+    const EntryDetail detail = repo.getEntryDetail(entryId, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(detail.formats.size(), 1);
+    const QString blobHash = detail.formats.first().blobHash;
+    QVERIFY(!blobHash.isEmpty());
+
+    const QString shardDir = dir.filePath(QStringLiteral("blobs/%1").arg(blobHash.left(2)));
+    QVERIFY2(QFile::setPermissions(shardDir, QFile::ReadOwner | QFile::ExeOwner),
+             "Failed to remove write permission from shard directory");
+
+    QVERIFY(!repo.deleteEntry(entryId, &error));
+    QVERIFY(!error.isEmpty());
+    QVERIFY(error.contains(QStringLiteral("Failed to remove blob file")));
+
+    QVERIFY2(QFile::setPermissions(shardDir, QFile::ReadOwner | QFile::WriteOwner |
+                                                 QFile::ExeOwner),
+             "Failed to restore shard directory permissions");
+
+    error.clear();
+    const EntryDetail afterFailedDelete = repo.getEntryDetail(entryId, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(afterFailedDelete.id, entryId);
+    QCOMPARE(afterFailedDelete.formats.size(), 1);
+
+    const QByteArray blobPayload = repo.loadBlob(blobHash, &error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(blobPayload, QByteArray("blob-rollback-data"));
 }
 
 void RepositoryTests::pinnedOrderMoveAndRepin() {

@@ -13,20 +13,84 @@
 #include <QSize>
 #include <QTimer>
 #include <QVector>
+#include <functional>
+#include <memory>
 
 class QAction;
-class QLocalServer;
 class QSystemTrayIcon;
+class QWidget;
 
 namespace pastetry {
 
 class ClipboardInspectorDialog;
+
+enum class SingleInstanceStartResult {
+    Started,
+    AddressInUse,
+    Failed,
+};
+
+enum class TakeoverPromptChoice {
+    Exit,
+    RetryHandoff,
+    TakeOver,
+};
+
+class IShortcutService : public QObject {
+    Q_OBJECT
+
+public:
+    explicit IShortcutService(QObject *parent = nullptr) : QObject(parent) {}
+    ~IShortcutService() override = default;
+
+    virtual ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
+                                                       bool requireModifier) = 0;
+    virtual void unregisterShortcut() = 0;
+    virtual QString lastError() const = 0;
+
+signals:
+    void activated();
+};
+
+class IShortcutServiceFactory {
+public:
+    virtual ~IShortcutServiceFactory() = default;
+    virtual IShortcutService *create(QObject *parent, int windowsHotkeyId) = 0;
+};
+
+class ISingleInstanceController {
+public:
+    virtual ~ISingleInstanceController() = default;
+    virtual bool notifyExistingInstance(const QString &instanceName, int timeoutMs,
+                                        QString *error) = 0;
+    virtual bool hasLikelyPeerUiProcess(qint64 selfPid, const QString &executableName,
+                                        QString *detail) const = 0;
+    virtual SingleInstanceStartResult startServer(
+        const QString &instanceName, QObject *owner,
+        const std::function<void(const QString &command)> &commandHandler,
+        QString *error) = 0;
+    virtual void removeServer(const QString &instanceName) = 0;
+};
+
+class IUserInteraction {
+public:
+    virtual ~IUserInteraction() = default;
+    virtual TakeoverPromptChoice promptSingleInstanceTakeover(QWidget *parent,
+                                                              const QString &detail) = 0;
+    virtual void showWarning(QWidget *parent, const QString &title,
+                             const QString &message) = 0;
+};
 
 class AppController : public QObject {
     Q_OBJECT
 
 public:
     explicit AppController(AppPaths paths, QObject *parent = nullptr);
+    AppController(AppPaths paths,
+                  std::unique_ptr<ISingleInstanceController> singleInstanceController,
+                  std::unique_ptr<IShortcutServiceFactory> shortcutFactory,
+                  std::unique_ptr<IUserInteraction> userInteraction,
+                  QObject *parent = nullptr);
     bool initialize(QString *error);
 
 private slots:
@@ -37,17 +101,10 @@ private slots:
     void handleQuitRequested();
 
 private:
-    enum class InstanceTakeoverDecision {
-        Exit,
-        RetryHandoff,
-        TakeOver,
-    };
-
     bool notifyExistingInstance(int timeoutMs, QString *error = nullptr);
     bool hasLikelyPeerUiProcess(QString *detail = nullptr) const;
     bool startSingleInstanceServer(QString *error);
-    InstanceTakeoverDecision promptSingleInstanceTakeover(const QString &detail);
-    void handleSingleInstanceNewConnection();
+    TakeoverPromptChoice promptSingleInstanceTakeover(const QString &detail);
     void handleSingleInstanceCommand(const QString &command);
 
     void setupTray();
@@ -73,6 +130,9 @@ private:
     QVector<bool> normalizedColumns(const QVector<bool> &columns) const;
 
     AppPaths m_paths;
+    std::unique_ptr<ISingleInstanceController> m_singleInstanceController;
+    std::unique_ptr<IShortcutServiceFactory> m_shortcutFactory;
+    std::unique_ptr<IUserInteraction> m_userInteraction;
     IpcAsyncRunner m_ipcRunner;
     MainWindow m_mainWindow;
     QuickPasteDialog m_quickPasteDialog;
@@ -83,11 +143,11 @@ private:
     QHash<QString, QString> m_shortcutErrors;
     QKeySequence m_autoPasteKey = QKeySequence(Qt::CTRL | Qt::Key_V);
 
-    QVector<GlobalShortcutService *> m_baseShortcutServices;
-    QVector<GlobalShortcutService *> m_chordSecondShortcutServices;
-    QHash<GlobalShortcutService *, QString> m_serviceToDirectAction;
-    QHash<GlobalShortcutService *, QString> m_serviceToChordFirstKey;
-    QHash<GlobalShortcutService *, QString> m_serviceToChordSecondAction;
+    QVector<IShortcutService *> m_baseShortcutServices;
+    QVector<IShortcutService *> m_chordSecondShortcutServices;
+    QHash<IShortcutService *, QString> m_serviceToDirectAction;
+    QHash<IShortcutService *, QString> m_serviceToChordFirstKey;
+    QHash<IShortcutService *, QString> m_serviceToChordSecondAction;
     QHash<QString, QVector<QString>> m_chordFirstToActions;
     QVector<QString> m_pendingChordActions;
     bool m_chordCaptureActive = false;
@@ -114,8 +174,8 @@ private:
     QAction *m_quitAction = nullptr;
     ClipboardInspectorDialog *m_clipboardInspectorDialog = nullptr;
 
-    QLocalServer *m_singleInstanceServer = nullptr;
     QString m_singleInstanceName;
+    bool m_lastSingleInstanceAddressInUse = false;
     bool m_isQuitting = false;
     bool m_daemonStatusKnown = false;
     bool m_daemonReachable = false;
