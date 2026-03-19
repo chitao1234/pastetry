@@ -7,6 +7,7 @@
 #include <QVector>
 
 class QLineEdit;
+class QPoint;
 class QTableView;
 class QTimer;
 class QHideEvent;
@@ -31,6 +32,7 @@ signals:
     void entryActivated();
     void errorOccurred(const QString &error);
     void popupHidden();
+    void visibleColumnsChanged(const QVector<bool> &visibleColumns);
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
@@ -42,6 +44,7 @@ private:
     void activateCurrent();
     qint64 selectedEntryId() const;
     void applyTableLayout();
+    void showHeaderContextMenu(const QPoint &position);
 
     IpcClient m_client;
     HistoryModel *m_model = nullptr;

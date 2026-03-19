@@ -81,6 +81,7 @@ Optional arguments for both binaries:
 - You can choose per-column visibility separately for:
   - History view
   - Quick paste view
+- You can also right-click the table header in History/Quick Paste to toggle visible columns directly.
 - Preview text line count is configurable (1-12) and applied with fixed row height per entry.
 - Preview text uses multiline rendering with last-line ellipsis when content exceeds visible lines.
 - Image entries render inline thumbnails in the Preview column with the same fixed row height as text entries.

@@ -56,6 +56,18 @@ AppController::AppController(AppPaths paths, QObject *parent)
         saveSettings();
     });
 
+    connect(&m_mainWindow, &MainWindow::visibleColumnsChanged, this,
+            [this](const QVector<bool> &visibleColumns) {
+                m_historyColumns = normalizedColumns(visibleColumns);
+                saveSettings();
+            });
+
+    connect(&m_quickPasteDialog, &QuickPasteDialog::visibleColumnsChanged, this,
+            [this](const QVector<bool> &visibleColumns) {
+                m_quickPasteColumns = normalizedColumns(visibleColumns);
+                saveSettings();
+            });
+
     connect(&m_mainWindow, &MainWindow::closeToTrayRequested, this, [this] {
         if (m_trayIcon && m_trayIcon->isVisible()) {
             m_trayIcon->showMessage(QStringLiteral("Pastetry"),

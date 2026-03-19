@@ -2,6 +2,7 @@
 
 #include "clip-ui/preview_text_delegate.h"
 
+#include <QAction>
 #include <QCborArray>
 #include <QCborMap>
 #include <QCursor>
@@ -10,6 +11,7 @@
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QMenu>
 #include <QStyleOptionViewItem>
 #include <QTableView>
 #include <QTimer>
@@ -70,6 +72,7 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
                                                       QHeaderView::ResizeToContents);
     m_table->horizontalHeader()->setSectionResizeMode(HistoryModel::PinnedColumn,
                                                       QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setContextMenuPolicy(Qt::CustomContextMenu);
 
     layout->addWidget(m_searchEdit);
     layout->addWidget(m_table);
@@ -85,6 +88,8 @@ QuickPasteDialog::QuickPasteDialog(IpcClient client, QWidget *parent)
             &QuickPasteDialog::activateCurrent);
     connect(m_table, &QTableView::doubleClicked, this,
             [this] { activateCurrent(); });
+    connect(m_table->horizontalHeader(), &QHeaderView::customContextMenuRequested,
+            this, &QuickPasteDialog::showHeaderContextMenu);
 
     applyTableLayout();
 }
@@ -232,6 +237,43 @@ void QuickPasteDialog::applyTableLayout() {
     const int rowHeight =
         m_previewDelegate->sizeHint(option, previewIndex).height();
     m_table->verticalHeader()->setDefaultSectionSize(rowHeight);
+}
+
+void QuickPasteDialog::showHeaderContextMenu(const QPoint &position) {
+    auto *header = m_table->horizontalHeader();
+    QMenu menu(this);
+
+    for (int column = 0; column < HistoryModel::ColumnCount; ++column) {
+        const QString label =
+            m_model->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString();
+        QAction *action = menu.addAction(label);
+        action->setCheckable(true);
+        action->setChecked(!m_table->isColumnHidden(column));
+
+        connect(action, &QAction::toggled, &menu, [this, action, column](bool checked) {
+            QVector<bool> updated = m_visibleColumns;
+            if (column < 0 || column >= updated.size()) {
+                return;
+            }
+            updated[column] = checked;
+
+            bool anyVisible = false;
+            for (const bool visible : updated) {
+                anyVisible = anyVisible || visible;
+            }
+            if (!anyVisible) {
+                action->blockSignals(true);
+                action->setChecked(true);
+                action->blockSignals(false);
+                return;
+            }
+
+            setVisibleColumns(updated);
+            emit visibleColumnsChanged(m_visibleColumns);
+        });
+    }
+
+    menu.exec(header->mapToGlobal(position));
 }
 
 }  // namespace pastetry

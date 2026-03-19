@@ -8,6 +8,7 @@
 #include <QVector>
 
 class QLineEdit;
+class QPoint;
 class QPushButton;
 class QTableView;
 class QTimer;
@@ -28,6 +29,7 @@ public:
 
 signals:
     void closeToTrayRequested();
+    void visibleColumnsChanged(const QVector<bool> &visibleColumns);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -43,6 +45,7 @@ private:
     void refresh(bool resetCursor);
     qint64 selectedEntryId() const;
     void applyTableLayout();
+    void showHeaderContextMenu(const QPoint &position);
 
     IpcClient m_client;
     HistoryModel *m_model = nullptr;
