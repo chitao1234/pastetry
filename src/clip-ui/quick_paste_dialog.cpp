@@ -13,6 +13,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenu>
 #include <QStyleOptionViewItem>
 #include <QTableView>
@@ -65,6 +66,34 @@ SearchMode searchModeFromComboIndex(int index) {
         default:
             return SearchMode::Plain;
     }
+}
+
+struct FormatMenuItem {
+    QString mimeType;
+    qint64 byteSize = 0;
+};
+
+QVector<FormatMenuItem> parseFormatMenuItems(const QCborArray &items) {
+    QVector<FormatMenuItem> formats;
+    formats.reserve(items.size());
+    for (const auto &item : items) {
+        const QCborMap map = item.toMap();
+        const QString mimeType = map.value(QStringLiteral("mime_type")).toString().trimmed();
+        if (mimeType.isEmpty()) {
+            continue;
+        }
+        FormatMenuItem format;
+        format.mimeType = mimeType;
+        format.byteSize = map.value(QStringLiteral("byte_size")).toInteger();
+        formats.push_back(format);
+    }
+    return formats;
+}
+
+QString formatMenuLabel(const FormatMenuItem &format) {
+    return QStringLiteral("%1 (%2)")
+        .arg(format.mimeType,
+             QLocale().formattedDataSize(qMax<qint64>(0, format.byteSize)));
 }
 
 }  // namespace
@@ -299,19 +328,24 @@ void QuickPasteDialog::activateCurrent() {
         return;
     }
 
+    activateEntryById(entryId, QString());
+}
+
+bool QuickPasteDialog::activateEntryById(qint64 entryId, const QString &preferredFormat) {
     QString error;
     QCborMap params;
     params.insert(QStringLiteral("entry_id"), entryId);
-    params.insert(QStringLiteral("preferred_format"), QString());
+    params.insert(QStringLiteral("preferred_format"), preferredFormat);
 
     m_client.request(QStringLiteral("ActivateEntry"), params, 2500, &error);
     if (!error.isEmpty()) {
         emit errorOccurred(error);
-        return;
+        return false;
     }
 
     emit entryActivated();
     hide();
+    return true;
 }
 
 void QuickPasteDialog::pinSelected() {
@@ -440,13 +474,41 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
     }
 
     m_table->selectRow(clicked.row());
+    const qint64 entryId = m_model->idAt(clicked.row());
+    if (entryId < 0) {
+        return;
+    }
     const bool pinned = m_model->pinnedAt(clicked.row());
 
     QMenu menu(this);
     QAction *activateAction = menu.addAction(QStringLiteral("Activate"));
+    QMenu *activateAsMenu = menu.addMenu(QStringLiteral("Activate As"));
     QAction *pinAction = menu.addAction(pinned ? QStringLiteral("Unpin")
                                                : QStringLiteral("Pin"));
     QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
+
+    QString detailError;
+    QCborMap detailParams;
+    detailParams.insert(QStringLiteral("entry_id"), entryId);
+    const QCborMap detailResult =
+        m_client.request(QStringLiteral("GetEntryDetail"), detailParams, 2500, &detailError);
+    if (!detailError.isEmpty()) {
+        QAction *unavailable =
+            activateAsMenu->addAction(QStringLiteral("Unavailable: %1").arg(detailError));
+        unavailable->setEnabled(false);
+    } else {
+        const QVector<FormatMenuItem> formats =
+            parseFormatMenuItems(detailResult.value(QStringLiteral("formats")).toArray());
+        if (formats.isEmpty()) {
+            QAction *none = activateAsMenu->addAction(QStringLiteral("No formats"));
+            none->setEnabled(false);
+        } else {
+            for (const auto &format : formats) {
+                QAction *action = activateAsMenu->addAction(formatMenuLabel(format));
+                action->setData(format.mimeType);
+            }
+        }
+    }
 
     QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(position));
     if (!chosen) {
@@ -463,6 +525,12 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
     }
     if (chosen == deleteAction) {
         deleteSelected();
+        return;
+    }
+
+    const QString preferredFormat = chosen->data().toString().trimmed();
+    if (!preferredFormat.isEmpty()) {
+        activateEntryById(entryId, preferredFormat);
     }
 }
 

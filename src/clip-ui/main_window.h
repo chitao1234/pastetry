@@ -44,6 +44,7 @@ private:
     void loadInitial();
     void loadMore();
     void activateSelected();
+    bool activateEntry(qint64 entryId, const QString &preferredFormat);
     void pinSelected();
     void deleteSelected();
     void clearHistory();

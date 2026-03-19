@@ -48,6 +48,7 @@ protected:
 private:
     void refreshResults();
     void activateCurrent();
+    bool activateEntryById(qint64 entryId, const QString &preferredFormat);
     void pinSelected();
     void deleteSelected();
     qint64 selectedEntryId() const;
