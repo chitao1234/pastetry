@@ -44,9 +44,9 @@ QSize PreviewTextDelegate::sizeHint(const QStyleOptionViewItem &option,
     const QSize base = QStyledItemDelegate::sizeHint(opt, index);
     const QFontMetrics fm(opt.font);
     const int desiredTextHeight = fm.lineSpacing() * m_maxLines;
-    const int inferredPadding = qMax(6, base.height() - fm.height());
+    const int verticalPadding = 8;
 
-    return QSize(base.width(), desiredTextHeight + inferredPadding);
+    return QSize(base.width(), desiredTextHeight + verticalPadding);
 }
 
 QStringList PreviewTextDelegate::wrappedLines(const QString &text, const QFont &font,
