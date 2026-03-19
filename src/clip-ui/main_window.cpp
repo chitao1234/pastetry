@@ -1,5 +1,6 @@
 #include "clip-ui/main_window.h"
 
+#include "clip-ui/entry_inspector_dialog.h"
 #include "clip-ui/preview_text_delegate.h"
 
 #include <QAction>
@@ -409,6 +410,7 @@ void MainWindow::showEntryContextMenu(const QPoint &position) {
     QMenu menu(this);
     QAction *activateAction = menu.addAction(QStringLiteral("Activate"));
     QMenu *activateAsMenu = menu.addMenu(QStringLiteral("Activate As"));
+    QAction *inspectAction = menu.addAction(QStringLiteral("Inspect Item"));
     QAction *pinAction = menu.addAction(pinned ? QStringLiteral("Unpin")
                                                : QStringLiteral("Pin"));
     QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
@@ -445,6 +447,10 @@ void MainWindow::showEntryContextMenu(const QPoint &position) {
         activateSelected();
         return;
     }
+    if (chosen == inspectAction) {
+        inspectEntry(entryId);
+        return;
+    }
     if (chosen == pinAction) {
         pinSelected();
         return;
@@ -458,6 +464,17 @@ void MainWindow::showEntryContextMenu(const QPoint &position) {
     if (!preferredFormat.isEmpty()) {
         activateEntry(entryId, preferredFormat);
     }
+}
+
+void MainWindow::inspectEntry(qint64 entryId) {
+    if (entryId <= 0) {
+        return;
+    }
+
+    if (!m_entryInspectorDialog) {
+        m_entryInspectorDialog = new EntryInspectorDialog(m_client, nullptr);
+    }
+    m_entryInspectorDialog->inspectEntry(entryId);
 }
 
 void MainWindow::loadInitial() {

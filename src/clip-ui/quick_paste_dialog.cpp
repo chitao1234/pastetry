@@ -1,5 +1,6 @@
 #include "clip-ui/quick_paste_dialog.h"
 
+#include "clip-ui/entry_inspector_dialog.h"
 #include "clip-ui/preview_text_delegate.h"
 
 #include <QAction>
@@ -508,6 +509,7 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
     QMenu menu(this);
     QAction *activateAction = menu.addAction(QStringLiteral("Activate"));
     QMenu *activateAsMenu = menu.addMenu(QStringLiteral("Activate As"));
+    QAction *inspectAction = menu.addAction(QStringLiteral("Inspect Item"));
     QAction *pinAction = menu.addAction(pinned ? QStringLiteral("Unpin")
                                                : QStringLiteral("Pin"));
     QAction *deleteAction = menu.addAction(QStringLiteral("Delete"));
@@ -544,6 +546,10 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
         activateCurrent();
         return;
     }
+    if (chosen == inspectAction) {
+        inspectEntry(entryId);
+        return;
+    }
     if (chosen == pinAction) {
         pinSelected();
         return;
@@ -557,6 +563,17 @@ void QuickPasteDialog::showEntryContextMenu(const QPoint &position) {
     if (!preferredFormat.isEmpty()) {
         activateEntryById(entryId, preferredFormat);
     }
+}
+
+void QuickPasteDialog::inspectEntry(qint64 entryId) {
+    if (entryId <= 0) {
+        return;
+    }
+
+    if (!m_entryInspectorDialog) {
+        m_entryInspectorDialog = new EntryInspectorDialog(m_client, nullptr);
+    }
+    m_entryInspectorDialog->inspectEntry(entryId);
 }
 
 }  // namespace pastetry

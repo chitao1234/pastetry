@@ -17,6 +17,7 @@ class QComboBox;
 namespace pastetry {
 
 class PreviewTextDelegate;
+class EntryInspectorDialog;
 
 class QuickPasteDialog : public QDialog {
     Q_OBJECT
@@ -55,6 +56,7 @@ private:
     void applyTableLayout();
     void showHeaderContextMenu(const QPoint &position);
     void showEntryContextMenu(const QPoint &position);
+    void inspectEntry(qint64 entryId);
     void setSearchError(const QString &message);
     void syncSearchModeCombo();
 
@@ -67,6 +69,7 @@ private:
     PreviewTextDelegate *m_previewDelegate = nullptr;
     QTimer *m_searchTimer = nullptr;
     QTimer *m_newHighlightTimer = nullptr;
+    EntryInspectorDialog *m_entryInspectorDialog = nullptr;
     QVector<bool> m_visibleColumns = {true, true, true, true};
     int m_previewLineCount = 2;
     SearchMode m_searchMode = SearchMode::Plain;

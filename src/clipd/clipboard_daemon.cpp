@@ -22,6 +22,9 @@ Q_LOGGING_CATEGORY(logClipd, "pastetry.clipd")
 namespace pastetry {
 namespace {
 constexpr int kDedupWindowMs = 300;
+constexpr int kDefaultInspectorPayloadBytes = 256 * 1024;
+constexpr int kMinInspectorPayloadBytes = 1024;
+constexpr int kMaxInspectorPayloadBytes = 2 * 1024 * 1024;
 constexpr qint64 kMinPolicyBytes = 1024;
 constexpr qint64 kMaxPolicyBytes = 1024LL * 1024 * 1024;
 
@@ -598,6 +601,33 @@ QCborMap ClipboardDaemon::handleRequest(const QCborMap &request) {
         QCborMap payload;
         payload.insert(QStringLiteral("mime_type"), QStringLiteral("image/png"));
         payload.insert(QStringLiteral("bytes"), pngBytes);
+        return ipc::makeResponse(id, payload);
+    }
+
+    if (method == "GetFormatPayload") {
+        const QString blobHash = params.value(QStringLiteral("blob_hash")).toString();
+        if (blobHash.trimmed().isEmpty()) {
+            return ipc::makeError(id, QStringLiteral("blob_hash is required"));
+        }
+
+        const QString mimeType = params.value(QStringLiteral("mime_type")).toString();
+        const int requestedMaxBytes = params.value(QStringLiteral("max_bytes")).toInteger();
+        const int maxBytes =
+            qBound(kMinInspectorPayloadBytes,
+                   requestedMaxBytes > 0 ? requestedMaxBytes
+                                         : kDefaultInspectorPayloadBytes,
+                   kMaxInspectorPayloadBytes);
+
+        const QByteArray bytes = m_repo.loadBlob(blobHash, &error);
+        if (!error.isEmpty()) {
+            return ipc::makeError(id, error);
+        }
+
+        QCborMap payload;
+        payload.insert(QStringLiteral("mime_type"), mimeType);
+        payload.insert(QStringLiteral("original_size"), bytes.size());
+        payload.insert(QStringLiteral("truncated"), bytes.size() > maxBytes);
+        payload.insert(QStringLiteral("bytes"), bytes.left(maxBytes));
         return ipc::makeResponse(id, payload);
     }
 
