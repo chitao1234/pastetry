@@ -44,9 +44,10 @@ QSize PreviewTextDelegate::sizeHint(const QStyleOptionViewItem &option,
     const QSize base = QStyledItemDelegate::sizeHint(opt, index);
     const QFontMetrics fm(opt.font);
     const int desiredTextHeight = fm.lineSpacing() * m_maxLines;
-    const int verticalPadding = 8;
+    const int verticalPadding = 10;
+    const int safetyPadding = 2;
 
-    return QSize(base.width(), desiredTextHeight + verticalPadding);
+    return QSize(base.width(), desiredTextHeight + verticalPadding + safetyPadding);
 }
 
 QStringList PreviewTextDelegate::wrappedLines(const QString &text, const QFont &font,
@@ -277,9 +278,9 @@ void PreviewTextDelegate::paint(QPainter *painter,
     const int lineHeight = fm.lineSpacing();
     const int drawLineCount = qMin(lines.size(), m_maxLines);
     const int totalHeight = lineHeight * drawLineCount;
-    int y = textRect.top();
+    int textTop = textRect.top();
     if (opt.displayAlignment & Qt::AlignVCenter) {
-        y = textRect.top() + qMax(0, (textRect.height() - totalHeight) / 2);
+        textTop = textRect.top() + qMax(0, (textRect.height() - totalHeight) / 2);
     }
 
     painter->save();
@@ -288,9 +289,8 @@ void PreviewTextDelegate::paint(QPainter *painter,
     painter->setPen(opt.palette.color(role));
 
     for (int i = 0; i < drawLineCount; ++i) {
-        const QRect lineRect(textRect.left(), y + i * lineHeight, textRect.width(),
-                             lineHeight);
-        painter->drawText(lineRect, Qt::AlignLeft | Qt::AlignVCenter, lines.at(i));
+        const int baselineY = textTop + i * lineHeight + fm.ascent();
+        painter->drawText(textRect.left(), baselineY, lines.at(i));
     }
 
     painter->restore();

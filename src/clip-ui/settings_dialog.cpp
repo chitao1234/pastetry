@@ -107,15 +107,15 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
         rowLayout->addWidget(disableButton);
 
         auto *statusLabel = new QLabel(shortcutsTab);
-        statusLabel->setWordWrap(true);
+        statusLabel->setWordWrap(false);
+        statusLabel->setTextFormat(Qt::PlainText);
+        statusLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
         m_shortcutEdits[index] = edit;
         m_shortcutStatusLabels[index] = statusLabel;
 
         shortcutsForm->addRow(globalShortcutActionLabel(index), row);
-        shortcutsForm->addRow(
-            QStringLiteral("%1 status").arg(globalShortcutActionLabel(index)),
-            statusLabel);
+        shortcutsForm->addRow(QStringLiteral("Status"), statusLabel);
 
         connect(disableButton, &QPushButton::clicked, this, [edit] { edit->clear(); });
         connect(edit, &QKeySequenceEdit::keySequenceChanged, this,
@@ -351,11 +351,21 @@ void SettingsDialog::setShortcutStatusTexts(
         return;
     }
 
-    m_shortcutStatusLabels[kQuickPasteShortcutIndex]->setText(
+    const QString quickPasteText =
+        quickPasteShortcutStatusText.simplified();
+    const QString openHistoryText =
+        openHistoryShortcutStatusText.simplified();
+    const QString openInspectorText =
+        openInspectorShortcutStatusText.simplified();
+
+    m_shortcutStatusLabels[kQuickPasteShortcutIndex]->setText(quickPasteText);
+    m_shortcutStatusLabels[kQuickPasteShortcutIndex]->setToolTip(
         quickPasteShortcutStatusText);
-    m_shortcutStatusLabels[kOpenHistoryShortcutIndex]->setText(
+    m_shortcutStatusLabels[kOpenHistoryShortcutIndex]->setText(openHistoryText);
+    m_shortcutStatusLabels[kOpenHistoryShortcutIndex]->setToolTip(
         openHistoryShortcutStatusText);
-    m_shortcutStatusLabels[kOpenInspectorShortcutIndex]->setText(
+    m_shortcutStatusLabels[kOpenInspectorShortcutIndex]->setText(openInspectorText);
+    m_shortcutStatusLabels[kOpenInspectorShortcutIndex]->setToolTip(
         openInspectorShortcutStatusText);
 }
 
