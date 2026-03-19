@@ -26,6 +26,31 @@ constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
 constexpr const char *kSettingsSearchMode = "search/mode";
 constexpr const char *kSettingsRegexStrict = "search/regex_strict_full_scan";
 
+QString shortcutStatusTextForState(const QKeySequence &shortcut,
+                                   ShortcutRegistrationState state,
+                                   const QString &errorText, bool isCurrentShortcut) {
+    const QString detail =
+        errorText.trimmed().isEmpty() ? QStringLiteral("Unknown error") : errorText;
+    const QString sequenceText = shortcut.toString();
+
+    switch (state) {
+        case ShortcutRegistrationState::Registered:
+            return isCurrentShortcut
+                       ? QStringLiteral("Active: %1").arg(sequenceText)
+                       : QStringLiteral("Available: %1").arg(sequenceText);
+        case ShortcutRegistrationState::Disabled:
+            return QStringLiteral("Disabled (no shortcut configured)");
+        case ShortcutRegistrationState::Unavailable:
+            return QStringLiteral("Unavailable: %1").arg(detail);
+        case ShortcutRegistrationState::InvalidBinding:
+            return QStringLiteral("Invalid binding: %1").arg(detail);
+        case ShortcutRegistrationState::Failed:
+            return QStringLiteral("Registration failed: %1").arg(detail);
+        default:
+            return QStringLiteral("Unknown shortcut state");
+    }
+}
+
 }  // namespace
 
 AppController::AppController(AppPaths paths, QObject *parent)
@@ -190,6 +215,24 @@ void AppController::openSettings() {
                      m_historyColumns, m_quickPasteColumns, m_previewLineCount,
                      m_regexStrictFullScan);
 
+    GlobalShortcutService probeShortcutService(&dialog);
+    auto updateShortcutAvailability = [&](const QKeySequence &candidateShortcut) {
+        ShortcutRegistrationState state = ShortcutRegistrationState::Disabled;
+        QString detail;
+        const bool currentShortcut = (candidateShortcut == m_shortcut);
+        if (currentShortcut) {
+            state = m_shortcutState;
+            detail = m_shortcutService.lastError();
+        } else {
+            state = probeShortcutService.registerShortcut(candidateShortcut);
+            detail = probeShortcutService.lastError();
+            probeShortcutService.unregisterShortcut();
+        }
+
+        dialog.setShortcutStatusText(shortcutStatusTextForState(
+            candidateShortcut, state, detail, currentShortcut));
+    };
+
     auto applyFromDialog = [&]() {
         m_shortcut = dialog.shortcut();
         m_startToTray = dialog.startToTray();
@@ -209,6 +252,8 @@ void AppController::openSettings() {
     };
 
     connect(&dialog, &SettingsDialog::applyRequested, &dialog, applyFromDialog);
+    connect(&dialog, &SettingsDialog::shortcutEdited, &dialog, updateShortcutAvailability);
+    updateShortcutAvailability(dialog.shortcut());
 
     if (dialog.exec() == QDialog::Accepted) {
         applyFromDialog();
@@ -433,23 +478,8 @@ QVector<bool> AppController::normalizedColumns(const QVector<bool> &columns) con
 }
 
 QString AppController::shortcutStatusText() const {
-    switch (m_shortcutState) {
-        case ShortcutRegistrationState::Registered:
-            return QStringLiteral("Active: %1").arg(m_shortcut.toString());
-        case ShortcutRegistrationState::Disabled:
-            return QStringLiteral("Disabled (no shortcut configured)");
-        case ShortcutRegistrationState::Unavailable:
-            return QStringLiteral("Unavailable: %1")
-                .arg(m_shortcutService.lastError());
-        case ShortcutRegistrationState::InvalidBinding:
-            return QStringLiteral("Invalid binding: %1")
-                .arg(m_shortcutService.lastError());
-        case ShortcutRegistrationState::Failed:
-            return QStringLiteral("Registration failed: %1")
-                .arg(m_shortcutService.lastError());
-        default:
-            return QStringLiteral("Unknown shortcut state");
-    }
+    return shortcutStatusTextForState(m_shortcut, m_shortcutState,
+                                      m_shortcutService.lastError(), true);
 }
 
 }  // namespace pastetry

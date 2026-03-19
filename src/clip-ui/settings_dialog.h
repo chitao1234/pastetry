@@ -33,6 +33,7 @@ public:
 
 signals:
     void applyRequested();
+    void shortcutEdited(const QKeySequence &shortcut);
 
 private:
     QVector<bool> columnsFromChecks(const QVector<QCheckBox *> &checks) const;

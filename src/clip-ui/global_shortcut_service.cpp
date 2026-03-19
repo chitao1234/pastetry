@@ -156,6 +156,31 @@ unsigned int qtModsToX11(Qt::KeyboardModifiers modifiers) {
     return mask;
 }
 
+thread_local int *g_x11GrabErrorCode = nullptr;
+
+int x11GrabErrorHandler(Display *display, XErrorEvent *event) {
+    Q_UNUSED(display);
+    if (g_x11GrabErrorCode && event && *g_x11GrabErrorCode == 0) {
+        *g_x11GrabErrorCode = static_cast<int>(event->error_code);
+    }
+    return 0;
+}
+
+QString x11ErrorCodeText(Display *display, int errorCode) {
+    if (!display || errorCode <= 0) {
+        return QStringLiteral("Unknown X11 error");
+    }
+
+    char buffer[256] = {};
+    XGetErrorText(display, errorCode, buffer, sizeof(buffer));
+    const QString text = QString::fromLatin1(buffer).trimmed();
+    if (!text.isEmpty()) {
+        return text;
+    }
+
+    return QStringLiteral("X11 error code %1").arg(errorCode);
+}
+
 unsigned int detectNumLockMask(Display *display) {
     if (!display) {
         return 0;
@@ -504,6 +529,11 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
     const Window root = DefaultRootWindow(display);
     m_x11NumLockMask = detectNumLockMask(display);
 
+    int grabErrorCode = 0;
+    g_x11GrabErrorCode = &grabErrorCode;
+    int (*oldErrorHandler)(Display *, XErrorEvent *) =
+        XSetErrorHandler(x11GrabErrorHandler);
+
     const unsigned int lockVariants[] = {0, LockMask, m_x11NumLockMask,
                                          LockMask | m_x11NumLockMask};
     for (const unsigned int lockMask : lockVariants) {
@@ -511,6 +541,18 @@ ShortcutRegistrationState GlobalShortcutService::registerX11Shortcut(
                  GrabModeAsync);
     }
     XSync(display, False);
+    XSetErrorHandler(oldErrorHandler);
+    g_x11GrabErrorCode = nullptr;
+
+    if (grabErrorCode != 0) {
+        for (const unsigned int lockMask : lockVariants) {
+            XUngrabKey(display, static_cast<int>(keyCode), nativeMods | lockMask, root);
+        }
+        XSync(display, False);
+        m_lastError = QStringLiteral("X11 refused shortcut (%1)")
+                          .arg(x11ErrorCodeText(display, grabErrorCode));
+        return ShortcutRegistrationState::Failed;
+    }
 
     m_x11Registered = true;
     m_x11Keycode = keyCode;

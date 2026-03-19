@@ -112,6 +112,8 @@ SettingsDialog::SettingsDialog(QWidget *parent) : QDialog(parent) {
     connect(clearButton, &QPushButton::clicked, this, [this] {
         m_shortcutEdit->clear();
     });
+    connect(m_shortcutEdit, &QKeySequenceEdit::keySequenceChanged, this,
+            &SettingsDialog::shortcutEdited);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
