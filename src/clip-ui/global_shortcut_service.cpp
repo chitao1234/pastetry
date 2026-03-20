@@ -27,6 +27,7 @@
 #if defined(PASTETRY_HAVE_DBUS)
 #include <QtDBus/QDBusArgument>
 #include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusConnectionInterface>
 #include <QtDBus/QDBusError>
 #include <QtDBus/QDBusMessage>
 #include <QtDBus/QDBusObjectPath>
@@ -514,6 +515,54 @@ QVariantMap dbusMapFromVariant(const QVariant &value) {
     return {};
 }
 
+QStringList portalShortcutIdsFromVariant(const QVariant &value) {
+    QStringList ids;
+    if (value.canConvert<QVariantList>()) {
+        const QVariantList list = value.toList();
+        for (const QVariant &item : list) {
+            if (item.canConvert<QVariantList>()) {
+                const QVariantList tuple = item.toList();
+                if (!tuple.isEmpty()) {
+                    const QString id = tuple.at(0).toString().trimmed();
+                    if (!id.isEmpty()) {
+                        ids.push_back(id);
+                    }
+                }
+                continue;
+            }
+            if (item.canConvert<QVariantMap>()) {
+                const QString id = item.toMap().value(QStringLiteral("id")).toString().trimmed();
+                if (!id.isEmpty()) {
+                    ids.push_back(id);
+                }
+            }
+        }
+    }
+
+    if (!ids.isEmpty()) {
+        return ids;
+    }
+
+    if (value.userType() == qMetaTypeId<QDBusArgument>()) {
+        const QDBusArgument dbusArg = qvariant_cast<QDBusArgument>(value);
+        dbusArg.beginArray();
+        while (!dbusArg.atEnd()) {
+            QString id;
+            QVariantMap options;
+            dbusArg.beginStructure();
+            dbusArg >> id >> options;
+            dbusArg.endStructure();
+            const QString trimmed = id.trimmed();
+            if (!trimmed.isEmpty()) {
+                ids.push_back(trimmed);
+            }
+        }
+        dbusArg.endArray();
+    }
+
+    return ids;
+}
+
 QString portalToken(const QString &prefix) {
     QString token = QStringLiteral("pastetry_%1_%2")
                         .arg(prefix,
@@ -521,6 +570,28 @@ QString portalToken(const QString &prefix) {
     token.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_]")),
                   QStringLiteral("_"));
     return token;
+}
+
+int portalInterfaceVersion(const QString &interfaceName) {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+        return -1;
+    }
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"));
+    msg << interfaceName << QStringLiteral("version");
+
+    QDBusReply<QVariant> reply = bus.call(msg, QDBus::Block, 1200);
+    if (!reply.isValid()) {
+        return -1;
+    }
+
+    bool ok = false;
+    const int version = reply.value().toInt(&ok);
+    return ok ? version : -1;
 }
 #endif
 
@@ -551,6 +622,91 @@ GlobalShortcutService::~GlobalShortcutService() {
     unregisterShortcut();
 }
 
+#if defined(PASTETRY_HAVE_DBUS)
+GlobalShortcutService::WaylandPortalCapabilities
+GlobalShortcutService::probeWaylandPortalCapabilities() const {
+    WaylandPortalCapabilities caps;
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    caps.sessionBusConnected = bus.isConnected();
+    if (!caps.sessionBusConnected) {
+        return caps;
+    }
+
+    QDBusConnectionInterface *iface = bus.interface();
+    if (!iface) {
+        return caps;
+    }
+
+    QDBusReply<bool> portalReply =
+        iface->isServiceRegistered(QStringLiteral("org.freedesktop.portal.Desktop"));
+    if (portalReply.isValid()) {
+        caps.portalServiceRegistered = portalReply.value();
+    }
+
+    QDBusReply<bool> kdeReply =
+        iface->isServiceRegistered(QStringLiteral("org.kde.kglobalaccel"));
+    if (kdeReply.isValid()) {
+        caps.kdeGlobalAccelServiceRegistered = kdeReply.value();
+    }
+
+    if (caps.portalServiceRegistered) {
+        caps.globalShortcutsVersion =
+            portalInterfaceVersion(QStringLiteral("org.freedesktop.portal.GlobalShortcuts"));
+        caps.clipboardVersion =
+            portalInterfaceVersion(QStringLiteral("org.freedesktop.portal.Clipboard"));
+        caps.inputCaptureVersion =
+            portalInterfaceVersion(QStringLiteral("org.freedesktop.portal.InputCapture"));
+    }
+    return caps;
+}
+
+bool GlobalShortcutService::isWaylandPortalShortcutAvailable(QString *error) const {
+    const WaylandPortalCapabilities caps = probeWaylandPortalCapabilities();
+    if (!caps.sessionBusConnected) {
+        if (error) {
+            *error = QStringLiteral("D-Bus session bus unavailable");
+        }
+        return false;
+    }
+    if (!caps.portalServiceRegistered) {
+        if (error) {
+            *error = QStringLiteral("org.freedesktop.portal.Desktop service unavailable");
+        }
+        return false;
+    }
+    if (caps.globalShortcutsVersion < 1) {
+        if (error) {
+            *error = QStringLiteral("GlobalShortcuts portal interface unavailable");
+        }
+        return false;
+    }
+
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
+void GlobalShortcutService::logWaylandCapabilityProbe() const {
+    if (m_waylandCapabilityLogged || !isWaylandPlatform()) {
+        return;
+    }
+
+    const WaylandPortalCapabilities caps = probeWaylandPortalCapabilities();
+    qCInfo(logShortcut)
+        << "Wayland shortcut capability probe:"
+        << "sessionBusConnected=" << caps.sessionBusConnected
+        << "portalServiceRegistered=" << caps.portalServiceRegistered
+        << "portalGlobalShortcutsVersion=" << caps.globalShortcutsVersion
+        << "portalClipboardVersion=" << caps.clipboardVersion
+        << "portalInputCaptureVersion=" << caps.inputCaptureVersion
+        << "kdeKGlobalAccelServiceRegistered=" << caps.kdeGlobalAccelServiceRegistered
+        << "forcedBackendEnv="
+        << qEnvironmentVariable("PASTETRY_SHORTCUT_BACKEND", QStringLiteral("<auto>"));
+    m_waylandCapabilityLogged = true;
+}
+#endif
+
 ShortcutBackendKind GlobalShortcutService::selectedBackend() const {
     const ShortcutBackendKind overridden =
         backendKindFromText(qEnvironmentVariable("PASTETRY_SHORTCUT_BACKEND"));
@@ -562,7 +718,13 @@ ShortcutBackendKind GlobalShortcutService::selectedBackend() const {
     return ShortcutBackendKind::Windows;
 #elif defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
     if (isWaylandPlatform()) {
-        return ShortcutBackendKind::WaylandPortal;
+#if defined(PASTETRY_HAVE_DBUS)
+        logWaylandCapabilityProbe();
+        if (isWaylandPortalShortcutAvailable()) {
+            return ShortcutBackendKind::WaylandPortal;
+        }
+#endif
+        return ShortcutBackendKind::WaylandWlroots;
     }
     if (isX11Platform()) {
         return ShortcutBackendKind::X11;
@@ -667,7 +829,7 @@ bool GlobalShortcutService::isSupported() const {
 #endif
         case ShortcutBackendKind::WaylandPortal:
 #if defined(PASTETRY_HAVE_DBUS)
-            return isWaylandPlatform() && QDBusConnection::sessionBus().isConnected();
+            return isWaylandPlatform() && isWaylandPortalShortcutAvailable();
 #else
             return false;
 #endif
@@ -897,7 +1059,28 @@ ShortcutRegistrationState GlobalShortcutService::registerWaylandPortalShortcut(
         return ShortcutRegistrationState::Unavailable;
     }
 
+    logWaylandCapabilityProbe();
+    QString portalAvailabilityError;
+    if (!isWaylandPortalShortcutAvailable(&portalAvailabilityError)) {
+        m_lastError = portalAvailabilityError.isEmpty()
+                          ? QStringLiteral("Wayland portal shortcut backend unavailable")
+                          : portalAvailabilityError;
+        return ShortcutRegistrationState::Unavailable;
+    }
+
     if (interactionPolicy == ShortcutInteractionPolicy::NonInteractive) {
+        if (createPortalShortcutSession(nullptr)) {
+            QStringList existingIds;
+            QString listError;
+            if (listPortalShortcuts(&existingIds, &listError)) {
+                qCInfo(logShortcut) << "Wayland portal startup probe discovered"
+                                    << existingIds.size() << "registered shortcuts";
+            } else if (!listError.trimmed().isEmpty()) {
+                qCInfo(logShortcut) << "Wayland portal startup shortcut listing skipped:"
+                                    << listError;
+            }
+            closePortalShortcutSession();
+        }
         m_lastError =
             QStringLiteral("Wayland shortcut registration deferred until Settings Apply");
         return ShortcutRegistrationState::Unavailable;
@@ -1188,6 +1371,51 @@ bool GlobalShortcutService::createPortalShortcutSession(QString *error) {
     }
 
     m_portalSessionPath = sessionPath;
+    return true;
+}
+
+bool GlobalShortcutService::listPortalShortcuts(QStringList *shortcutIds, QString *error) {
+    if (shortcutIds) {
+        shortcutIds->clear();
+    }
+
+    if (m_portalSessionPath.trimmed().isEmpty()) {
+        if (error) {
+            *error = QStringLiteral("Portal session unavailable");
+        }
+        return false;
+    }
+
+    QVariantMap options;
+    options.insert(QStringLiteral("handle_token"), portalToken(QStringLiteral("list")));
+
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.portal.GlobalShortcuts"),
+        QStringLiteral("ListShortcuts"));
+    msg << QDBusObjectPath(m_portalSessionPath) << options;
+
+    QDBusReply<QDBusObjectPath> reply = bus.call(msg, QDBus::Block, 5000);
+    if (!reply.isValid()) {
+        if (error) {
+            *error = QStringLiteral("ListShortcuts failed: %1")
+                         .arg(reply.error().message());
+        }
+        return false;
+    }
+
+    QVariantMap results;
+    if (!waitForPortalRequest(reply.value().path(), 8000, &results, error)) {
+        return false;
+    }
+
+    const QStringList ids =
+        portalShortcutIdsFromVariant(results.value(QStringLiteral("shortcuts")));
+    if (shortcutIds) {
+        *shortcutIds = ids;
+    }
     return true;
 }
 

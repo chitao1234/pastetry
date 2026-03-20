@@ -6,6 +6,7 @@
 #include <QList>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVariantMap>
 #include <QVector>
 
@@ -102,6 +103,20 @@ private slots:
 
 #if defined(PASTETRY_HAVE_DBUS)
 private:
+    struct WaylandPortalCapabilities {
+        bool sessionBusConnected = false;
+        bool portalServiceRegistered = false;
+        int globalShortcutsVersion = -1;
+        int clipboardVersion = -1;
+        int inputCaptureVersion = -1;
+        bool kdeGlobalAccelServiceRegistered = false;
+    };
+
+    WaylandPortalCapabilities probeWaylandPortalCapabilities() const;
+    bool isWaylandPortalShortcutAvailable(QString *error = nullptr) const;
+    bool listPortalShortcuts(QStringList *shortcutIds, QString *error);
+    void logWaylandCapabilityProbe() const;
+
     bool waitForPortalRequest(const QString &requestPath, int timeoutMs,
                               QVariantMap *results, QString *error);
     bool createPortalShortcutSession(QString *error);
@@ -135,6 +150,7 @@ private:
     QString m_portalSessionPath;
     QString m_portalShortcutId;
     bool m_portalRegistered = false;
+    mutable bool m_waylandCapabilityLogged = false;
 #endif
 };
 
