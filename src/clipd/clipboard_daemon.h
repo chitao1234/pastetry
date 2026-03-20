@@ -2,6 +2,7 @@
 
 #include "common/app_paths.h"
 #include "common/clipboard_repository.h"
+#include "clipd/wayland_clipboard_runtime.h"
 
 #include <QLocalServer>
 #include <QMimeData>
@@ -50,6 +51,8 @@ private:
     qint64 m_lastCaptureAtMs = 0;
     QTimer m_clipboardPollTimer;
     bool m_waylandSession = false;
+    WaylandBackendSelection m_waylandBackendSelection;
+    WaylandClipboardProbeResult m_waylandProbeResult;
     CapturePolicy m_capturePolicy;
 };
 

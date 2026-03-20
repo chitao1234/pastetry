@@ -1,4 +1,5 @@
 #include "clipd/clipboard_daemon.h"
+#include "clipd/wayland_capability_probe.h"
 
 #include "common/ipc_protocol.h"
 
@@ -22,7 +23,6 @@ Q_LOGGING_CATEGORY(logClipd, "pastetry.clipd")
 namespace pastetry {
 namespace {
 constexpr int kDedupWindowMs = 300;
-constexpr int kWaylandQtPollIntervalMs = 450;
 constexpr int kDefaultInspectorPayloadBytes = 256 * 1024;
 constexpr int kMinInspectorPayloadBytes = 1024;
 constexpr int kMaxInspectorPayloadBytes = 2 * 1024 * 1024;
@@ -299,20 +299,57 @@ bool ClipboardDaemon::start(QString *error) {
 
     m_waylandSession = isWaylandPlatform();
     if (m_waylandSession) {
-        m_clipboardPollTimer.setInterval(kWaylandQtPollIntervalMs);
+        const bool dataControlEnvSet =
+            qEnvironmentVariableIsSet("QT_WAYLAND_USE_DATA_CONTROL");
+        const QByteArray dataControlEnv = qgetenv("QT_WAYLAND_USE_DATA_CONTROL");
+        const bool dataControlRequested =
+            dataControlEnvSet && parseTruthyEnvFlag(dataControlEnv);
+        m_waylandProbeResult = probeWaylandClipboardCapabilities();
+        m_waylandBackendSelection = selectWaylandClipboardBackend(
+            {true, dataControlRequested, m_waylandProbeResult},
+            kWaylandRobustPollIntervalMs, kWaylandDegradedPollIntervalMs);
+
+        m_clipboardPollTimer.setInterval(m_waylandBackendSelection.pollIntervalMs);
         connect(&m_clipboardPollTimer, &QTimer::timeout, this,
                 &ClipboardDaemon::pollClipboard);
         m_clipboardPollTimer.start();
 
+        const QString dataControlText = dataControlEnvSet
+                                            ? QString::fromUtf8(dataControlEnv)
+                                            : QStringLiteral("<unset>");
         qCInfo(logClipd) << "Wayland clipboard capability probe:"
-                         << "nativeExternalCommandBackend=false"
-#if defined(PASTETRY_HAVE_QT_WAYLAND_CLIENT)
-                         << "qtWaylandClientLinked=true"
-#else
-                         << "qtWaylandClientLinked=false"
-#endif
+                         << "sessionType="
+                         << qEnvironmentVariable("XDG_SESSION_TYPE",
+                                                 QStringLiteral("<unset>"))
+                         << "waylandDisplaySet="
+                         << !qgetenv("WAYLAND_DISPLAY").trimmed().isEmpty()
+                         << "qtWaylandUseDataControl=" << dataControlText
+                         << "dataControlRequested=" << dataControlRequested
+                         << "probeAvailability="
+                         << waylandProbeAvailabilityToString(
+                                m_waylandProbeResult.availability)
+                         << "hasZwlrDataControlManager="
+                         << m_waylandProbeResult.hasZwlrDataControlManager
+                         << "hasExtDataControlManager="
+                         << m_waylandProbeResult.hasExtDataControlManager
+                         << "selectedMode="
+                         << waylandClipboardModeToString(
+                                m_waylandBackendSelection.mode)
+                         << "selectionReason=" << m_waylandBackendSelection.reason
                          << "qtSignalMonitor=true"
                          << "qtPollIntervalMs=" << m_clipboardPollTimer.interval();
+
+        if (!m_waylandProbeResult.error.isEmpty()) {
+            qCInfo(logClipd) << "Wayland clipboard probe detail:"
+                             << m_waylandProbeResult.error;
+        }
+        if (!m_waylandBackendSelection.robust) {
+            qCWarning(logClipd)
+                << "Wayland clipboard monitoring running in degraded mode:"
+                << m_waylandBackendSelection.reason
+                << "- clipboard capture may miss updates depending on compositor"
+                   " capabilities.";
+        }
     }
 
     qCInfo(logClipd) << "Daemon started, socket:" << m_paths.socketName;

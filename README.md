@@ -93,6 +93,8 @@ Optional arguments for both binaries:
     - Direct shortcut mode is supported through Wayland backend selection.
     - Chord shortcut mode is unavailable in current Wayland builds.
     - Startup uses non-interactive registration; interactive registration is attempted on `Settings` apply.
+    - Clipboard daemon auto-enables `QT_WAYLAND_USE_DATA_CONTROL=1` when unset to
+      prefer native compositor clipboard-manager support.
 - Optional backend override for debugging/support:
   - `PASTETRY_SHORTCUT_BACKEND=auto|windows|x11|wayland_portal|wayland_wlroots|disabled`
 
@@ -124,6 +126,8 @@ Optional arguments for both binaries:
 - This implementation is C++20 + Qt Widgets only.
 - On Linux X11, auto-paste simulation for slot actions requires XTest support at build time.
 - Linux builds no longer require X11 development packages; X11/XTest integrations are enabled when present.
+- On Wayland, when compositor data-control support is unavailable (or probe support is
+  not built), clipboard monitoring falls back to degraded Qt mode and may miss some updates.
 - Hashing currently uses SHA-256 for blob identity/dedup.
 - Clipboard source app/window metadata is stored as `unknown`/empty in this prototype.
 - Logging:

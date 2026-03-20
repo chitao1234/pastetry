@@ -9,6 +9,10 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Sql Network Test)
 find_package(Qt6 6.4 QUIET COMPONENTS DBus WaylandClient)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+endif()
 
 add_library(pastetry_common
     src/common/app_paths.cpp
@@ -32,9 +36,15 @@ target_link_libraries(pastetry_common
 add_executable(pastetry-clipd
     src/clipd/main.cpp
     src/clipd/clipboard_daemon.cpp
+    src/clipd/wayland_clipboard_runtime.cpp
+    src/clipd/wayland_capability_probe.cpp
 )
 
 target_link_libraries(pastetry-clipd PRIVATE pastetry_common)
+if(TARGET PkgConfig::WAYLAND_CLIENT)
+    target_link_libraries(pastetry-clipd PRIVATE PkgConfig::WAYLAND_CLIENT)
+    target_compile_definitions(pastetry-clipd PRIVATE PASTETRY_HAVE_WAYLAND_CLIENT=1)
+endif()
 
 add_library(pastetry_ui
     src/clip-ui/app_controller.cpp
@@ -118,3 +128,15 @@ add_test(NAME quick_paste_dialog_tests COMMAND quick_paste_dialog_tests)
 set_tests_properties(quick_paste_dialog_tests PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
+
+add_executable(wayland_clipboard_runtime_tests
+    tests/wayland_clipboard_runtime_tests.cpp
+    src/clipd/wayland_clipboard_runtime.cpp
+)
+target_include_directories(wayland_clipboard_runtime_tests PRIVATE src)
+target_link_libraries(wayland_clipboard_runtime_tests
+    PRIVATE
+        Qt6::Core
+        Qt6::Test
+)
+add_test(NAME wayland_clipboard_runtime_tests COMMAND wayland_clipboard_runtime_tests)
