@@ -31,10 +31,12 @@
 #if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
 #include <QtCore/qnativeinterface.h>
 #include <QtGui/qguiapplication_platform.h>
+#if defined(PASTETRY_HAVE_X11)
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #if defined(PASTETRY_HAVE_XTEST)
 #include <X11/extensions/XTest.h>
+#endif
 #endif
 #endif
 
@@ -58,6 +60,11 @@ constexpr const char *kSettingsPreviewLines = "ui/preview_lines";
 constexpr const char *kSettingsSearchMode = "search/mode";
 constexpr const char *kSettingsRegexStrict = "search/regex_strict_full_scan";
 constexpr int kChordTimeoutMs = 1200;
+
+bool isWaylandPlatform() {
+    return QGuiApplication::platformName().contains(QStringLiteral("wayland"),
+                                                    Qt::CaseInsensitive);
+}
 
 QStringList normalizedAllowlistPatterns(const QStringList &patterns) {
     QStringList normalized;
@@ -398,7 +405,7 @@ bool qtKeyToWindowsVk(int qtKey, UINT *outVk) {
 }
 #endif
 
-#if defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
+#if defined(Q_OS_UNIX) && !defined(Q_OS_MAC) && defined(PASTETRY_HAVE_X11)
 bool qtKeyToX11KeySym(int qtKey, KeySym *outSym) {
     if (!outSym) {
         return false;
@@ -519,9 +526,10 @@ public:
                 &IShortcutService::activated);
     }
 
-    ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
-                                               bool requireModifier) override {
-        return m_impl.registerShortcut(sequence, requireModifier);
+    ShortcutRegistrationState registerShortcut(
+        const QKeySequence &sequence, bool requireModifier,
+        ShortcutInteractionPolicy interactionPolicy) override {
+        return m_impl.registerShortcut(sequence, requireModifier, interactionPolicy);
     }
 
     void unregisterShortcut() override {
@@ -1006,7 +1014,7 @@ bool AppController::initialize(QString *error) {
     setupTray();
     m_mainWindow.setCloseToTrayEnabled(m_startToTray && m_trayIcon &&
                                        m_trayIcon->isVisible());
-    applyShortcutSettings(true);
+    applyShortcutSettings(true, ShortcutInteractionPolicy::NonInteractive);
     checkDaemonConnectivity(true);
     m_ipcRunner.request(
         QStringLiteral("GetCapturePolicy"), QCborMap{}, 1800, this,
@@ -1300,7 +1308,7 @@ void AppController::openSettings() {
                 applyViewSettings();
             }
             if (shortcutsChanged || autoPasteChanged) {
-                applyShortcutSettings(true);
+                applyShortcutSettings(true, ShortcutInteractionPolicy::Interactive);
             }
             saveSettings();
 
@@ -1677,7 +1685,8 @@ void AppController::clearChordCaptureRegistrations() {
     m_chordCaptureActive = false;
 }
 
-void AppController::applyShortcutSettings(bool notifyFailures) {
+void AppController::applyShortcutSettings(bool notifyFailures,
+                                          ShortcutInteractionPolicy interactionPolicy) {
     clearChordCaptureRegistrations();
     clearShortcutRegistrations();
 
@@ -1696,6 +1705,8 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
         m_shortcutErrors[it.key()] = it.value();
     }
 
+    const bool waylandSession = isWaylandPlatform();
+
     QHash<QString, QString> directActionByKey;
     QHash<QString, QVector<QString>> chordActionsByFirst;
     for (const auto &spec : allShortcutActionSpecs()) {
@@ -1710,12 +1721,20 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
                 directActionByKey.insert(key, spec.id);
             }
         } else if (binding.mode == ShortcutBindingMode::Chord) {
+            if (waylandSession) {
+                m_shortcutStates[spec.id] = ShortcutRegistrationState::Unavailable;
+                m_shortcutErrors[spec.id] = QStringLiteral(
+                    "Chord shortcuts are unavailable on Wayland in this build");
+                continue;
+            }
             const QString key = shortcutKey(binding.chordFirstSequence);
             if (!key.isEmpty()) {
                 chordActionsByFirst[key].push_back(spec.id);
             }
         }
     }
+
+    QStringList failureLines;
 
     for (auto it = directActionByKey.cbegin(); it != directActionByKey.cend(); ++it) {
         const QString actionId = it.value();
@@ -1733,7 +1752,7 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
             continue;
         }
         const ShortcutRegistrationState state =
-            service->registerShortcut(binding.directSequence, true);
+            service->registerShortcut(binding.directSequence, true, interactionPolicy);
         const QString detail = service->lastError();
 
         m_shortcutStates[actionId] = state;
@@ -1749,11 +1768,9 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
             if (notifyFailures &&
                 (state == ShortcutRegistrationState::Failed ||
                  state == ShortcutRegistrationState::Unavailable)) {
-                notifyShortcutWarning(
-                    QStringLiteral("Pastetry shortcut"),
-                    QStringLiteral("%1: %2")
-                        .arg(actionLabel(actionId),
-                             stateDetailText(state, detail)));
+                failureLines.push_back(QStringLiteral("%1: %2")
+                                           .arg(actionLabel(actionId),
+                                                stateDetailText(state, detail)));
             }
         }
     }
@@ -1783,7 +1800,8 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
             continue;
         }
         const ShortcutRegistrationState state =
-            service->registerShortcut(binding.chordFirstSequence, true);
+            service->registerShortcut(binding.chordFirstSequence, true,
+                                      interactionPolicy);
         const QString detail = service->lastError();
 
         for (const QString &actionId : actions) {
@@ -1803,14 +1821,24 @@ void AppController::applyShortcutSettings(bool notifyFailures) {
                 (state == ShortcutRegistrationState::Failed ||
                  state == ShortcutRegistrationState::Unavailable)) {
                 for (const QString &actionId : actions) {
-                    notifyShortcutWarning(
-                        QStringLiteral("Pastetry shortcut"),
-                        QStringLiteral("%1: %2")
-                            .arg(actionLabel(actionId),
-                                 stateDetailText(state, detail)));
+                    failureLines.push_back(QStringLiteral("%1: %2")
+                                               .arg(actionLabel(actionId),
+                                                    stateDetailText(state, detail)));
                 }
             }
         }
+    }
+
+    if (!failureLines.isEmpty()) {
+        failureLines.removeDuplicates();
+        const int maxLines = 8;
+        QStringList rendered = failureLines.mid(0, maxLines);
+        if (failureLines.size() > maxLines) {
+            rendered.push_back(
+                QStringLiteral("... and %1 more").arg(failureLines.size() - maxLines));
+        }
+        notifyShortcutWarning(QStringLiteral("Pastetry shortcut"),
+                             rendered.join(QLatin1Char('\n')));
     }
 }
 
@@ -1841,7 +1869,8 @@ void AppController::beginChordCapture(const QString &firstKeyPortable) {
             continue;
         }
         const ShortcutRegistrationState state =
-            service->registerShortcut(binding.chordSecondSequence, false);
+            service->registerShortcut(binding.chordSecondSequence, false,
+                                      ShortcutInteractionPolicy::NonInteractive);
 
         if (state == ShortcutRegistrationState::Registered) {
             connect(service, &IShortcutService::activated, this,
@@ -1875,7 +1904,7 @@ void AppController::endChordCapture() {
     }
 
     clearChordCaptureRegistrations();
-    applyShortcutSettings(false);
+    applyShortcutSettings(false, ShortcutInteractionPolicy::NonInteractive);
 }
 
 void AppController::handleShortcutAction(const QString &actionId) {
@@ -1943,6 +1972,20 @@ void AppController::executeSlotShortcut(const ShortcutActionSpec &spec) {
 
                     QString pasteError;
                     if (!sendSyntheticPaste(&pasteError)) {
+                        const bool manualFallback =
+                            isWaylandPlatform() &&
+                            pasteError.contains(QStringLiteral("manual paste"),
+                                                Qt::CaseInsensitive);
+                        if (manualFallback) {
+                            if (!m_manualPasteFallbackNotified) {
+                                m_manualPasteFallbackNotified = true;
+                                notifyShortcutInfo(
+                                    QStringLiteral("Pastetry shortcut"),
+                                    QStringLiteral("Clipboard item activated. "
+                                                   "Use your normal paste shortcut to paste."));
+                            }
+                            return;
+                        }
                         notifyShortcutWarning(
                             QStringLiteral("Pastetry shortcut"),
                             QStringLiteral("%1: auto-paste failed: %2")
@@ -2024,7 +2067,14 @@ bool AppController::sendSyntheticPaste(QString *error) const {
 
     return true;
 #elif defined(Q_OS_UNIX) && !defined(Q_OS_MAC)
-#if defined(PASTETRY_HAVE_XTEST)
+    if (isWaylandPlatform()) {
+        if (error) {
+            *error = QStringLiteral("manual paste required on Wayland backend");
+        }
+        return false;
+    }
+
+#if defined(PASTETRY_HAVE_X11) && defined(PASTETRY_HAVE_XTEST)
     if (!QGuiApplication::platformName().contains(QStringLiteral("xcb"))) {
         if (error) {
             *error = QStringLiteral("auto-paste is unavailable outside X11 sessions");
@@ -2090,7 +2140,8 @@ bool AppController::sendSyntheticPaste(QString *error) const {
     return true;
 #else
     if (error) {
-        *error = QStringLiteral("X11 XTest library not available in this build");
+        *error = QStringLiteral(
+            "auto-paste unavailable: X11 XTest support not available in this build");
     }
     return false;
 #endif
@@ -2113,6 +2164,15 @@ void AppController::notifyShortcutWarning(const QString &title,
     } else {
         QMessageBox::warning(&m_mainWindow, title, message);
     }
+}
+
+void AppController::notifyShortcutInfo(const QString &title,
+                                       const QString &message) {
+    if (m_trayIcon && m_trayIcon->isVisible()) {
+        m_trayIcon->showMessage(title, message, QSystemTrayIcon::Information, 3500);
+        return;
+    }
+    QMessageBox::information(&m_mainWindow, title, message);
 }
 
 void AppController::checkDaemonConnectivity(bool notifyIfUnavailable) {

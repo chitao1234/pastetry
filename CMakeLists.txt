@@ -8,6 +8,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Sql Network Test)
+find_package(Qt6 6.4 QUIET COMPONENTS DBus WaylandClient)
 
 add_library(pastetry_common
     src/common/app_paths.cpp
@@ -54,13 +55,26 @@ target_link_libraries(pastetry_ui
         Qt6::Widgets
 )
 
+if(Qt6DBus_FOUND)
+    target_link_libraries(pastetry_ui PRIVATE Qt6::DBus)
+    target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_DBUS=1)
+endif()
+
+if(Qt6WaylandClient_FOUND)
+    target_link_libraries(pastetry_ui PRIVATE Qt6::WaylandClient)
+    target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_QT_WAYLAND_CLIENT=1)
+endif()
+
 if(UNIX AND NOT APPLE)
-    find_package(X11 REQUIRED)
-    target_include_directories(pastetry_ui PRIVATE ${X11_INCLUDE_DIR})
-    target_link_libraries(pastetry_ui PRIVATE ${X11_LIBRARIES})
-    if(X11_XTest_FOUND)
-        target_link_libraries(pastetry_ui PRIVATE ${X11_XTest_LIB})
-        target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_XTEST=1)
+    find_package(X11 QUIET)
+    if(X11_FOUND)
+        target_include_directories(pastetry_ui PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(pastetry_ui PRIVATE ${X11_LIBRARIES})
+        target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_X11=1)
+        if(X11_XTest_FOUND)
+            target_link_libraries(pastetry_ui PRIVATE ${X11_XTest_LIB})
+            target_compile_definitions(pastetry_ui PRIVATE PASTETRY_HAVE_XTEST=1)
+        endif()
     endif()
 endif()
 

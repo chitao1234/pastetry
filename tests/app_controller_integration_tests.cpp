@@ -199,9 +199,10 @@ class FakeShortcutService final : public IShortcutService {
 public:
     explicit FakeShortcutService(QObject *parent = nullptr) : IShortcutService(parent) {}
 
-    ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
-                                               bool requireModifier) override {
-        registerCalls.push_back({sequence, requireModifier});
+    ShortcutRegistrationState registerShortcut(
+        const QKeySequence &sequence, bool requireModifier,
+        ShortcutInteractionPolicy interactionPolicy) override {
+        registerCalls.push_back({sequence, requireModifier, interactionPolicy});
         return nextRegisterState;
     }
 
@@ -219,7 +220,14 @@ public:
 
     ShortcutRegistrationState nextRegisterState = ShortcutRegistrationState::Registered;
     QString lastErrorText;
-    QVector<QPair<QKeySequence, bool>> registerCalls;
+    struct RegisterCall {
+        QKeySequence sequence;
+        bool requireModifier = false;
+        ShortcutInteractionPolicy interactionPolicy =
+            ShortcutInteractionPolicy::Interactive;
+    };
+
+    QVector<RegisterCall> registerCalls;
     int unregisterCallCount = 0;
 };
 
@@ -314,7 +322,7 @@ FakeShortcutService *findServiceByPortableSequence(const QVector<FakeShortcutSer
         if (!service || service->registerCalls.isEmpty()) {
             continue;
         }
-        if (service->registerCalls.first().first.toString(QKeySequence::PortableText) ==
+        if (service->registerCalls.first().sequence.toString(QKeySequence::PortableText) ==
             portableText) {
             return service;
         }
@@ -584,6 +592,10 @@ void AppControllerIntegrationTests::shortcutRegistrationAndChordLifecycle() {
                                       QStringLiteral("Ctrl+K"));
     QVERIFY(directService);
     QVERIFY(chordFirstService);
+    QCOMPARE(directService->registerCalls.first().interactionPolicy,
+             ShortcutInteractionPolicy::NonInteractive);
+    QCOMPARE(chordFirstService->registerCalls.first().interactionPolicy,
+             ShortcutInteractionPolicy::NonInteractive);
 
     chordFirstService->triggerActivated();
     QTRY_COMPARE(shortcutFactory->createdServices.size(), 3);
@@ -591,9 +603,11 @@ void AppControllerIntegrationTests::shortcutRegistrationAndChordLifecycle() {
     FakeShortcutService *chordSecondService = shortcutFactory->createdServices.last();
     QVERIFY(chordSecondService);
     QCOMPARE(chordSecondService->registerCalls.size(), 1);
-    QCOMPARE(chordSecondService->registerCalls.first().first.toString(QKeySequence::PortableText),
+    QCOMPARE(chordSecondService->registerCalls.first().sequence.toString(QKeySequence::PortableText),
              QStringLiteral("Ctrl+C"));
-    QVERIFY(!chordSecondService->registerCalls.first().second);
+    QVERIFY(!chordSecondService->registerCalls.first().requireModifier);
+    QCOMPARE(chordSecondService->registerCalls.first().interactionPolicy,
+             ShortcutInteractionPolicy::NonInteractive);
 
     chordSecondService->triggerActivated();
     QTRY_COMPARE(shortcutFactory->createdServices.size(), 5);

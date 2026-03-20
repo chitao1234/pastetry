@@ -44,8 +44,9 @@ public:
     explicit IShortcutService(QObject *parent = nullptr) : QObject(parent) {}
     ~IShortcutService() override = default;
 
-    virtual ShortcutRegistrationState registerShortcut(const QKeySequence &sequence,
-                                                       bool requireModifier) = 0;
+    virtual ShortcutRegistrationState registerShortcut(
+        const QKeySequence &sequence, bool requireModifier,
+        ShortcutInteractionPolicy interactionPolicy) = 0;
     virtual void unregisterShortcut() = 0;
     virtual QString lastError() const = 0;
 
@@ -112,7 +113,10 @@ private:
     void setupTray();
     void loadSettings();
     void saveSettings();
-    void applyShortcutSettings(bool notifyFailures = true);
+    void applyShortcutSettings(
+        bool notifyFailures = true,
+        ShortcutInteractionPolicy interactionPolicy =
+            ShortcutInteractionPolicy::Interactive);
     void clearShortcutRegistrations();
     void clearChordCaptureRegistrations();
     void beginChordCapture(const QString &firstKeyPortable);
@@ -121,6 +125,7 @@ private:
     void executeSlotShortcut(const ShortcutActionSpec &spec);
     bool sendSyntheticPaste(QString *error) const;
     void notifyShortcutWarning(const QString &title, const QString &message);
+    void notifyShortcutInfo(const QString &title, const QString &message);
 
     void applyViewSettings();
     void checkDaemonConnectivity(bool notifyIfUnavailable);
@@ -183,6 +188,7 @@ private:
     bool m_daemonReachable = false;
     bool m_pingInFlight = false;
     bool m_pingNotifyIfUnavailable = false;
+    bool m_manualPasteFallbackNotified = false;
     QTimer m_daemonHealthTimer;
     QTimer m_chordTimeoutTimer;
 };

@@ -89,13 +89,20 @@ Optional arguments for both binaries:
 - Current backend targets:
   - Windows: global shortcut supported.
   - Linux X11 (`xcb` session): global shortcut supported.
-  - Linux Wayland: global shortcut registration is unavailable; tray actions still work.
+  - Linux Wayland:
+    - Direct shortcut mode is supported through Wayland backend selection.
+    - Chord shortcut mode is unavailable in current Wayland builds.
+    - Startup uses non-interactive registration; interactive registration is attempted on `Settings` apply.
+- Optional backend override for debugging/support:
+  - `PASTETRY_SHORTCUT_BACKEND=auto|windows|x11|wayland_portal|wayland_wlroots|disabled`
 
 ### Slot actions
 
 - Recent slots (`recent #1..#9`) resolve from newest non-pinned entries only.
 - Pinned slots (`pinned #1..#9`) resolve from manual pinned order.
 - Paste slot actions activate entry + send synthetic paste key sequence.
+- On Wayland where synthetic paste is unavailable, paste slot actions still activate the
+  selected entry and show a one-time manual-paste info hint.
 - If slot item is missing, UI shows a warning notification.
 
 ### Display preferences
@@ -116,6 +123,7 @@ Optional arguments for both binaries:
 
 - This implementation is C++20 + Qt Widgets only.
 - On Linux X11, auto-paste simulation for slot actions requires XTest support at build time.
+- Linux builds no longer require X11 development packages; X11/XTest integrations are enabled when present.
 - Hashing currently uses SHA-256 for blob identity/dedup.
 - Clipboard source app/window metadata is stored as `unknown`/empty in this prototype.
 - Logging:
