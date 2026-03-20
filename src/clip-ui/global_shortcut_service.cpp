@@ -32,6 +32,7 @@
 #include <QtDBus/QDBusObjectPath>
 #include <QtDBus/QDBusPendingReply>
 #include <QtDBus/QDBusReply>
+#include <QtDBus/qdbusmetatype.h>
 #endif
 
 Q_LOGGING_CATEGORY(logShortcut, "pastetry.shortcut")
@@ -458,6 +459,19 @@ UINT qtModsToWindows(Qt::KeyboardModifiers modifiers) {
 #endif
 
 #if defined(PASTETRY_HAVE_DBUS)
+void ensurePortalDbusTypesRegistered() {
+    static bool registered = false;
+    if (registered) {
+        return;
+    }
+    qRegisterMetaType<pastetry::PortalShortcutBinding>("pastetry::PortalShortcutBinding");
+    qRegisterMetaType<pastetry::PortalShortcutBindingList>(
+        "pastetry::PortalShortcutBindingList");
+    qDBusRegisterMetaType<pastetry::PortalShortcutBinding>();
+    qDBusRegisterMetaType<pastetry::PortalShortcutBindingList>();
+    registered = true;
+}
+
 QString dbusPathFromVariant(const QVariant &value) {
     if (value.canConvert<QDBusObjectPath>()) {
         const QDBusObjectPath path = qvariant_cast<QDBusObjectPath>(value);
@@ -511,6 +525,24 @@ QString portalToken(const QString &prefix) {
 #endif
 
 }  // namespace
+
+// DBus marshalling for a(sa{sv}) shortcut list entries.
+#if defined(PASTETRY_HAVE_DBUS)
+QDBusArgument &operator<<(QDBusArgument &arg, const PortalShortcutBinding &binding) {
+    arg.beginStructure();
+    arg << binding.id << binding.options;
+    arg.endStructure();
+    return arg;
+}
+
+const QDBusArgument &operator>>(const QDBusArgument &arg,
+                                PortalShortcutBinding &binding) {
+    arg.beginStructure();
+    arg >> binding.id >> binding.options;
+    arg.endStructure();
+    return arg;
+}
+#endif
 
 GlobalShortcutService::GlobalShortcutService(QObject *parent, int windowsHotkeyId)
     : QObject(parent), m_hotkeyId(windowsHotkeyId) {}
@@ -1167,6 +1199,8 @@ bool GlobalShortcutService::bindPortalShortcut(const QString &trigger, QString *
         return false;
     }
 
+    ensurePortalDbusTypesRegistered();
+
     m_portalShortcutId = portalToken(QStringLiteral("shortcut"));
 
     QVariantMap shortcutOptions;
@@ -1174,12 +1208,8 @@ bool GlobalShortcutService::bindPortalShortcut(const QString &trigger, QString *
                            QStringLiteral("Pastetry shortcut"));
     shortcutOptions.insert(QStringLiteral("preferred_trigger"), trigger);
 
-    QDBusArgument shortcuts;
-    shortcuts.beginArray(qMetaTypeId<QDBusArgument>());
-    shortcuts.beginStructure();
-    shortcuts << m_portalShortcutId << shortcutOptions;
-    shortcuts.endStructure();
-    shortcuts.endArray();
+    PortalShortcutBindingList shortcuts;
+    shortcuts.push_back(PortalShortcutBinding{m_portalShortcutId, shortcutOptions});
 
     QVariantMap options;
     options.insert(QStringLiteral("handle_token"), portalToken(QStringLiteral("bind")));

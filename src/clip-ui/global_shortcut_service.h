@@ -3,12 +3,16 @@
 #include <QAbstractNativeEventFilter>
 #include <QHash>
 #include <QKeySequence>
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <QVariantMap>
 #include <QVector>
 
 class QDBusMessage;
+#if defined(PASTETRY_HAVE_DBUS)
+class QDBusArgument;
+#endif
 
 namespace pastetry {
 
@@ -33,6 +37,17 @@ enum class ShortcutBackendKind {
     WaylandWlroots,
     Disabled,
 };
+
+#if defined(PASTETRY_HAVE_DBUS)
+struct PortalShortcutBinding {
+    QString id;
+    QVariantMap options;
+};
+using PortalShortcutBindingList = QList<PortalShortcutBinding>;
+
+QDBusArgument &operator<<(QDBusArgument &arg, const PortalShortcutBinding &binding);
+const QDBusArgument &operator>>(const QDBusArgument &arg, PortalShortcutBinding &binding);
+#endif
 
 class GlobalShortcutService : public QObject, public QAbstractNativeEventFilter {
     Q_OBJECT
@@ -124,3 +139,8 @@ private:
 };
 
 }  // namespace pastetry
+
+#if defined(PASTETRY_HAVE_DBUS)
+Q_DECLARE_METATYPE(pastetry::PortalShortcutBinding)
+Q_DECLARE_METATYPE(pastetry::PortalShortcutBindingList)
+#endif

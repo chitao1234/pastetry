@@ -7,6 +7,7 @@
 #include <QMimeData>
 #include <QObject>
 #include <QHash>
+#include <QTimer>
 
 class QClipboard;
 class QLocalSocket;
@@ -22,6 +23,7 @@ public:
 
 private:
     void onClipboardChanged();
+    void pollClipboard();
     void onNewConnection();
     void onClientReadyRead(QLocalSocket *socket);
 
@@ -32,6 +34,7 @@ private:
     bool setCapturePolicy(const CapturePolicy &policy, QString *error);
     bool loadCapturePolicy(QString *error);
     QString fingerprint(const CapturedEntry &entry) const;
+    void captureCurrentClipboard(bool fromPoll);
 
     AppPaths m_paths;
     ClipboardRepository m_repo;
@@ -40,7 +43,9 @@ private:
     QHash<QLocalSocket *, QByteArray> m_clientBuffers;
     bool m_suppressCapture = false;
     QString m_lastFingerprint;
+    QString m_lastObservedFingerprint;
     qint64 m_lastCaptureAtMs = 0;
+    QTimer m_clipboardPollTimer;
     CapturePolicy m_capturePolicy;
 };
 

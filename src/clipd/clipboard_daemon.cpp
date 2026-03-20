@@ -289,6 +289,20 @@ bool ClipboardDaemon::start(QString *error) {
     m_clipboard = QGuiApplication::clipboard();
     connect(m_clipboard, &QClipboard::dataChanged, this,
             &ClipboardDaemon::onClipboardChanged);
+    connect(m_clipboard, &QClipboard::changed, this,
+            [this](QClipboard::Mode mode) {
+                if (mode == QClipboard::Clipboard) {
+                    onClipboardChanged();
+                }
+            });
+
+    if (QGuiApplication::platformName().contains(QStringLiteral("wayland"),
+                                                 Qt::CaseInsensitive)) {
+        m_clipboardPollTimer.setInterval(450);
+        connect(&m_clipboardPollTimer, &QTimer::timeout, this,
+                &ClipboardDaemon::pollClipboard);
+        m_clipboardPollTimer.start();
+    }
 
     qCInfo(logClipd) << "Daemon started, socket:" << m_paths.socketName;
     return true;
@@ -420,8 +434,8 @@ QString ClipboardDaemon::fingerprint(const CapturedEntry &entry) const {
     return QString::fromLatin1(hash.result().toHex());
 }
 
-void ClipboardDaemon::onClipboardChanged() {
-    if (m_suppressCapture) {
+void ClipboardDaemon::captureCurrentClipboard(bool fromPoll) {
+    if (m_suppressCapture || !m_clipboard) {
         return;
     }
 
@@ -431,6 +445,11 @@ void ClipboardDaemon::onClipboardChanged() {
     }
 
     const QString fp = fingerprint(entry);
+    if (fromPoll && fp == m_lastObservedFingerprint) {
+        return;
+    }
+    m_lastObservedFingerprint = fp;
+
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (fp == m_lastFingerprint && (now - m_lastCaptureAtMs) < kDedupWindowMs) {
         return;
@@ -445,6 +464,14 @@ void ClipboardDaemon::onClipboardChanged() {
 
     m_lastFingerprint = fp;
     m_lastCaptureAtMs = now;
+}
+
+void ClipboardDaemon::onClipboardChanged() {
+    captureCurrentClipboard(false);
+}
+
+void ClipboardDaemon::pollClipboard() {
+    captureCurrentClipboard(true);
 }
 
 void ClipboardDaemon::onNewConnection() {
