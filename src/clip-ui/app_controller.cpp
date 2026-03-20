@@ -1111,6 +1111,21 @@ void AppController::openClipboardInspector() {
 
 void AppController::openSettings() {
     SettingsDialog dialog(&m_mainWindow);
+    bool hadRegisteredShortcut = false;
+    for (auto it = m_shortcutStates.cbegin(); it != m_shortcutStates.cend(); ++it) {
+        if (it.value() == ShortcutRegistrationState::Registered) {
+            hadRegisteredShortcut = true;
+            break;
+        }
+    }
+    ShortcutInteractionPolicy resumePolicy =
+        hadRegisteredShortcut ? ShortcutInteractionPolicy::Interactive
+                              : ShortcutInteractionPolicy::NonInteractive;
+
+    auto suspendShortcutsForDialog = [this]() {
+        clearChordCaptureRegistrations();
+        clearShortcutRegistrations();
+    };
 
     auto currentStatusTexts = [&]() {
         QHash<QString, QString> statusTexts;
@@ -1309,6 +1324,11 @@ void AppController::openSettings() {
             }
             if (shortcutsChanged || autoPasteChanged) {
                 applyShortcutSettings(true, ShortcutInteractionPolicy::Interactive);
+                resumePolicy = ShortcutInteractionPolicy::Interactive;
+                if (dialog.isVisible()) {
+                    // Keep shortcut backends quiesced while user is editing settings.
+                    suspendShortcutsForDialog();
+                }
             }
             saveSettings();
 
@@ -1392,7 +1412,9 @@ void AppController::openSettings() {
         m_userInteraction->onSettingsDialogOpened(&dialog);
     }
 
+    suspendShortcutsForDialog();
     dialog.exec();
+    applyShortcutSettings(false, resumePolicy);
 }
 
 void AppController::handleQuitRequested() {
