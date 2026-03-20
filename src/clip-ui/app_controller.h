@@ -19,6 +19,7 @@
 class QAction;
 class QSystemTrayIcon;
 class QWidget;
+class QDialog;
 
 namespace pastetry {
 
@@ -79,6 +80,7 @@ public:
                                                               const QString &detail) = 0;
     virtual void showWarning(QWidget *parent, const QString &title,
                              const QString &message) = 0;
+    virtual void onSettingsDialogOpened(QDialog *dialog) = 0;
 };
 
 class AppController : public QObject {

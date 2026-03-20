@@ -1,13 +1,17 @@
 #include "clip-ui/app_controller.h"
 #include "common/ipc_protocol.h"
 
+#include <QApplication>
 #include <QCoreApplication>
+#include <QDialog>
 #include <QDir>
+#include <QKeySequenceEdit>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUuid>
 
 using namespace pastetry;
@@ -124,8 +128,12 @@ public:
         const int index = notifyCallCount++;
         const bool result = index < notifyResults.size() ? notifyResults.at(index) : false;
         if (error) {
-            *error = index < notifyErrors.size() ? notifyErrors.at(index)
-                                                 : QStringLiteral("handoff failed");
+            if (result) {
+                error->clear();
+            } else {
+                *error = index < notifyErrors.size() ? notifyErrors.at(index)
+                                                     : QStringLiteral("handoff failed");
+            }
         }
         return result;
     }
@@ -248,15 +256,24 @@ public:
         warnings.push_back({title, message});
     }
 
+    void onSettingsDialogOpened(QDialog *dialog) override {
+        settingsDialogOpenCount++;
+        if (settingsDialogHook) {
+            settingsDialogHook(dialog);
+        }
+    }
+
     struct WarningItem {
         QString title;
         QString message;
     };
 
     int promptCallCount = 0;
+    int settingsDialogOpenCount = 0;
     QVector<TakeoverPromptChoice> promptChoices;
     QVector<QString> promptDetails;
     QVector<WarningItem> warnings;
+    std::function<void(QDialog *)> settingsDialogHook;
 };
 
 void configureSettingsRoot(const QString &rootDir) {
@@ -305,6 +322,19 @@ FakeShortcutService *findServiceByPortableSequence(const QVector<FakeShortcutSer
     return nullptr;
 }
 
+QWidget *findTopLevelByTitle(const QString &title) {
+    const auto topLevels = QApplication::topLevelWidgets();
+    for (QWidget *widget : topLevels) {
+        if (!widget) {
+            continue;
+        }
+        if (widget->windowTitle() == title) {
+            return widget;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 class AppControllerIntegrationTests : public QObject {
@@ -312,9 +342,12 @@ class AppControllerIntegrationTests : public QObject {
 
 private slots:
     void staleSocketFalseAlarmTakesOverWithoutPrompt();
+    void peerConflictRetryThenHandoffPath();
     void peerConflictExitPath();
     void peerConflictTakeOverPath();
+    void singleInstanceCommandDispatch();
     void shortcutRegistrationAndChordLifecycle();
+    void settingsCancelAfterEditKeepsShortcutRegistrations();
 };
 
 void AppControllerIntegrationTests::staleSocketFalseAlarmTakesOverWithoutPrompt() {
@@ -353,6 +386,45 @@ void AppControllerIntegrationTests::staleSocketFalseAlarmTakesOverWithoutPrompt(
     QCOMPARE(singleInstance->startCallCount, 2);
     QCOMPARE(singleInstance->removeCallCount, 1);
     QCOMPARE(userInteraction->promptCallCount, 0);
+}
+
+void AppControllerIntegrationTests::peerConflictRetryThenHandoffPath() {
+    QTemporaryDir settingsDir;
+    QTemporaryDir dataDir;
+    QVERIFY(settingsDir.isValid());
+    QVERIFY(dataDir.isValid());
+    configureSettingsRoot(settingsDir.path());
+
+    const QString socketName =
+        QStringLiteral("pastetry-test-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
+    FakeDaemonServer daemon(socketName);
+    QString daemonError;
+    QVERIFY2(daemon.start(&daemonError), qPrintable(daemonError));
+
+    auto *singleInstance = new FakeSingleInstanceController();
+    singleInstance->notifyResults = {false, false, true};
+    singleInstance->notifyErrors = {QStringLiteral("not connected"),
+                                    QStringLiteral("broken pipe"), QString()};
+    singleInstance->startResults = {SingleInstanceStartResult::AddressInUse};
+    singleInstance->peerRunning = true;
+    singleInstance->peerDetail = QStringLiteral("Found peer UI process PID(s): 4321");
+
+    auto *shortcutFactory = new FakeShortcutServiceFactory();
+    auto *userInteraction = new FakeUserInteraction();
+    userInteraction->promptChoices = {TakeoverPromptChoice::RetryHandoff};
+
+    AppController controller(makeAppPaths(dataDir, socketName),
+                             std::unique_ptr<ISingleInstanceController>(singleInstance),
+                             std::unique_ptr<IShortcutServiceFactory>(shortcutFactory),
+                             std::unique_ptr<IUserInteraction>(userInteraction));
+
+    QString error;
+    QVERIFY(!controller.initialize(&error));
+    QVERIFY(error.isEmpty());
+    QCOMPARE(singleInstance->notifyCallCount, 3);
+    QCOMPARE(singleInstance->startCallCount, 1);
+    QCOMPARE(singleInstance->removeCallCount, 0);
+    QCOMPARE(userInteraction->promptCallCount, 1);
 }
 
 void AppControllerIntegrationTests::peerConflictExitPath() {
@@ -425,6 +497,51 @@ void AppControllerIntegrationTests::peerConflictTakeOverPath() {
     QCOMPARE(userInteraction->promptCallCount, 1);
 }
 
+void AppControllerIntegrationTests::singleInstanceCommandDispatch() {
+    QTemporaryDir settingsDir;
+    QTemporaryDir dataDir;
+    QVERIFY(settingsDir.isValid());
+    QVERIFY(dataDir.isValid());
+    configureSettingsRoot(settingsDir.path());
+
+    const QString socketName =
+        QStringLiteral("pastetry-test-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
+    FakeDaemonServer daemon(socketName);
+    QString daemonError;
+    QVERIFY2(daemon.start(&daemonError), qPrintable(daemonError));
+
+    auto *singleInstance = new FakeSingleInstanceController();
+    singleInstance->notifyResults = {false};
+    singleInstance->startResults = {SingleInstanceStartResult::Started};
+
+    auto *shortcutFactory = new FakeShortcutServiceFactory();
+    auto *userInteraction = new FakeUserInteraction();
+
+    AppController controller(makeAppPaths(dataDir, socketName),
+                             std::unique_ptr<ISingleInstanceController>(singleInstance),
+                             std::unique_ptr<IShortcutServiceFactory>(shortcutFactory),
+                             std::unique_ptr<IUserInteraction>(userInteraction));
+
+    QString error;
+    QVERIFY2(controller.initialize(&error), qPrintable(error));
+
+    QWidget *mainWindow = findTopLevelByTitle(QStringLiteral("Pastetry"));
+    QVERIFY(mainWindow);
+    mainWindow->hide();
+    QTRY_VERIFY(!mainWindow->isVisible());
+
+    singleInstance->triggerCommand(QStringLiteral("show-main"));
+    QTRY_VERIFY(mainWindow->isVisible());
+
+    singleInstance->triggerCommand(QStringLiteral("toggle-popup"));
+    QWidget *quickPaste = findTopLevelByTitle(QStringLiteral("Quick Paste"));
+    QVERIFY(quickPaste);
+    QTRY_VERIFY(quickPaste->isVisible());
+
+    singleInstance->triggerCommand(QStringLiteral("toggle-popup"));
+    QTRY_VERIFY(!quickPaste->isVisible());
+}
+
 void AppControllerIntegrationTests::shortcutRegistrationAndChordLifecycle() {
     QTemporaryDir settingsDir;
     QTemporaryDir dataDir;
@@ -481,6 +598,65 @@ void AppControllerIntegrationTests::shortcutRegistrationAndChordLifecycle() {
     chordSecondService->triggerActivated();
     QTRY_COMPARE(shortcutFactory->createdServices.size(), 5);
     QVERIFY(directService->unregisterCallCount > 0);
+}
+
+void AppControllerIntegrationTests::settingsCancelAfterEditKeepsShortcutRegistrations() {
+    QTemporaryDir settingsDir;
+    QTemporaryDir dataDir;
+    QVERIFY(settingsDir.isValid());
+    QVERIFY(dataDir.isValid());
+    configureSettingsRoot(settingsDir.path());
+
+    setShortcutBinding(QStringLiteral("quick_paste_popup"), QStringLiteral("direct"),
+                       QStringLiteral("Ctrl+Alt+P"));
+
+    const QString socketName =
+        QStringLiteral("pastetry-test-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
+    FakeDaemonServer daemon(socketName);
+    QString daemonError;
+    QVERIFY2(daemon.start(&daemonError), qPrintable(daemonError));
+
+    auto *singleInstance = new FakeSingleInstanceController();
+    singleInstance->notifyResults = {false};
+    singleInstance->startResults = {SingleInstanceStartResult::Started};
+
+    auto *shortcutFactory = new FakeShortcutServiceFactory();
+    auto *userInteraction = new FakeUserInteraction();
+
+    bool hookRan = false;
+    bool editedShortcut = false;
+    userInteraction->settingsDialogHook =
+        [&hookRan, &editedShortcut](QDialog *dialog) {
+            hookRan = true;
+            QList<QKeySequenceEdit *> edits = dialog->findChildren<QKeySequenceEdit *>();
+            if (!edits.isEmpty()) {
+                edits.first()->setKeySequence(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+                editedShortcut = true;
+            }
+            QTimer::singleShot(0, dialog, &QDialog::reject);
+        };
+
+    AppController controller(makeAppPaths(dataDir, socketName),
+                             std::unique_ptr<ISingleInstanceController>(singleInstance),
+                             std::unique_ptr<IShortcutServiceFactory>(shortcutFactory),
+                             std::unique_ptr<IUserInteraction>(userInteraction));
+
+    QString error;
+    QVERIFY2(controller.initialize(&error), qPrintable(error));
+
+    FakeShortcutService *directService =
+        findServiceByPortableSequence(shortcutFactory->createdServices,
+                                      QStringLiteral("Ctrl+Alt+P"));
+    QVERIFY(directService);
+    const int createdBefore = shortcutFactory->createdServices.size();
+    const int unregisteredBefore = directService->unregisterCallCount;
+
+    QVERIFY(QMetaObject::invokeMethod(&controller, "openSettings", Qt::DirectConnection));
+    QVERIFY(hookRan);
+    QVERIFY(editedShortcut);
+    QCOMPARE(userInteraction->settingsDialogOpenCount, 1);
+    QCOMPARE(shortcutFactory->createdServices.size(), createdBefore);
+    QCOMPARE(directService->unregisterCallCount, unregisteredBefore);
 }
 
 QTEST_MAIN(AppControllerIntegrationTests)

@@ -794,6 +794,10 @@ public:
                      const QString &message) override {
         QMessageBox::warning(parent, title, message);
     }
+
+    void onSettingsDialogOpened(QDialog *dialog) override {
+        Q_UNUSED(dialog);
+    }
 };
 
 }  // namespace
@@ -1376,6 +1380,9 @@ void AppController::openSettings() {
     connect(&dialog, &SettingsDialog::shortcutsEdited, &dialog,
             updateShortcutAvailability);
     updateShortcutAvailability();
+    if (m_userInteraction) {
+        m_userInteraction->onSettingsDialogOpened(&dialog);
+    }
 
     dialog.exec();
 }
