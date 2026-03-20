@@ -12,10 +12,8 @@
 #include <QImageWriter>
 #include <QLocalSocket>
 #include <QLoggingCategory>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QSet>
-#include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
 
@@ -24,8 +22,7 @@ Q_LOGGING_CATEGORY(logClipd, "pastetry.clipd")
 namespace pastetry {
 namespace {
 constexpr int kDedupWindowMs = 300;
-constexpr int kWaylandQtPollIntervalMs = 1200;
-constexpr int kWaylandWlPastePollIntervalMs = 800;
+constexpr int kWaylandQtPollIntervalMs = 450;
 constexpr int kDefaultInspectorPayloadBytes = 256 * 1024;
 constexpr int kMinInspectorPayloadBytes = 1024;
 constexpr int kMaxInspectorPayloadBytes = 2 * 1024 * 1024;
@@ -302,36 +299,20 @@ bool ClipboardDaemon::start(QString *error) {
 
     m_waylandSession = isWaylandPlatform();
     if (m_waylandSession) {
-        m_wlPasteExecutable = QStandardPaths::findExecutable(QStringLiteral("wl-paste"));
-        m_waylandWlPasteEnabled = !m_wlPasteExecutable.trimmed().isEmpty();
-
         m_clipboardPollTimer.setInterval(kWaylandQtPollIntervalMs);
         connect(&m_clipboardPollTimer, &QTimer::timeout, this,
                 &ClipboardDaemon::pollClipboard);
         m_clipboardPollTimer.start();
 
-        if (m_waylandWlPasteEnabled) {
-            m_waylandClipboardPollTimer.setInterval(kWaylandWlPastePollIntervalMs);
-            connect(&m_waylandClipboardPollTimer, &QTimer::timeout, this,
-                    &ClipboardDaemon::pollWaylandClipboard);
-            m_waylandClipboardPollTimer.start();
-        }
-
         qCInfo(logClipd) << "Wayland clipboard capability probe:"
-                         << "wlPastePath="
-                         << (m_waylandWlPasteEnabled ? m_wlPasteExecutable
-                                                     : QStringLiteral("<missing>"))
+                         << "nativeExternalCommandBackend=false"
+#if defined(PASTETRY_HAVE_QT_WAYLAND_CLIENT)
+                         << "qtWaylandClientLinked=true"
+#else
+                         << "qtWaylandClientLinked=false"
+#endif
                          << "qtSignalMonitor=true"
-                         << "qtPollIntervalMs=" << m_clipboardPollTimer.interval()
-                         << "wlPastePollIntervalMs="
-                         << (m_waylandWlPasteEnabled
-                                 ? m_waylandClipboardPollTimer.interval()
-                                 : 0);
-        if (!m_waylandWlPasteEnabled) {
-            qCWarning(logClipd)
-                << "Wayland compositor clipboard API helper (wl-paste) is unavailable;"
-                   " falling back to Qt clipboard polling/signals only.";
-        }
+                         << "qtPollIntervalMs=" << m_clipboardPollTimer.interval();
     }
 
     qCInfo(logClipd) << "Daemon started, socket:" << m_paths.socketName;
@@ -510,193 +491,12 @@ bool ClipboardDaemon::captureCurrentClipboard(bool fromPoll) {
     return captureEntry(entry, fromPoll);
 }
 
-bool ClipboardDaemon::runWlPaste(const QStringList &args, QByteArray *stdoutData,
-                                 QString *error) const {
-    if (!m_waylandWlPasteEnabled || m_wlPasteExecutable.trimmed().isEmpty()) {
-        if (error) {
-            *error = QStringLiteral("wl-paste unavailable");
-        }
-        return false;
-    }
-
-    QProcess proc;
-    proc.setProgram(m_wlPasteExecutable);
-    proc.setArguments(args);
-    proc.start();
-    if (!proc.waitForStarted(300)) {
-        if (error) {
-            *error = QStringLiteral("Failed to start wl-paste");
-        }
-        return false;
-    }
-
-    if (!proc.waitForFinished(1200)) {
-        proc.kill();
-        proc.waitForFinished(200);
-        if (error) {
-            *error = QStringLiteral("wl-paste timed out");
-        }
-        return false;
-    }
-
-    if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0) {
-        if (error) {
-            QString stderrText = QString::fromUtf8(proc.readAllStandardError()).trimmed();
-            if (stderrText.isEmpty()) {
-                stderrText = QStringLiteral("exit code %1").arg(proc.exitCode());
-            }
-            *error = stderrText;
-        }
-        return false;
-    }
-
-    if (stdoutData) {
-        *stdoutData = proc.readAllStandardOutput();
-    }
-    if (error) {
-        error->clear();
-    }
-    return true;
-}
-
-bool ClipboardDaemon::captureWaylandClipboardViaWlPaste(bool fromPoll) {
-    if (!m_waylandSession || !m_waylandWlPasteEnabled) {
-        return false;
-    }
-
-    QByteArray typesBytes;
-    QString wlError;
-    if (!runWlPaste({QStringLiteral("--list-types")}, &typesBytes, &wlError)) {
-        return false;
-    }
-
-    const QList<QByteArray> rawLines = typesBytes.split('\n');
-    QStringList mimeTypes;
-    mimeTypes.reserve(rawLines.size());
-    QSet<QString> seenMime;
-    for (const QByteArray &line : rawLines) {
-        const QString mime = QString::fromUtf8(line).trimmed().toLower();
-        if (mime.isEmpty() || seenMime.contains(mime)) {
-            continue;
-        }
-        seenMime.insert(mime);
-        mimeTypes.push_back(mime);
-    }
-    if (mimeTypes.isEmpty()) {
-        return false;
-    }
-
-    CapturedEntry entry;
-    entry.sourceApp = QStringLiteral("unknown");
-    entry.sourceWindow = QStringLiteral("");
-
-    QSet<QString> captured;
-    qint64 totalBytes = 0;
-    auto addFormat = [&](const QString &mimeType, const QByteArray &data,
-                         const QString &sourceTag) {
-        const QString normalizedMime = mimeType.trimmed().toLower();
-        if (normalizedMime.isEmpty() || captured.contains(normalizedMime)) {
-            return;
-        }
-        if (data.isEmpty()) {
-            return;
-        }
-        if (!policyAllowsMime(m_capturePolicy, normalizedMime)) {
-            return;
-        }
-        if (data.size() > m_capturePolicy.maxFormatBytes) {
-            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
-                             << "- exceeds per-format cap";
-            return;
-        }
-        if ((totalBytes + data.size()) > m_capturePolicy.maxEntryBytes) {
-            qCInfo(logClipd) << "Dropped format" << normalizedMime << "from" << sourceTag
-                             << "- exceeds per-entry cap";
-            return;
-        }
-        captured.insert(normalizedMime);
-        totalBytes += data.size();
-        entry.formats.push_back(CapturedFormat{normalizedMime, data});
-    };
-
-    for (const QString &mimeType : mimeTypes) {
-        QByteArray payload;
-        if (!runWlPaste({QStringLiteral("--no-newline"), QStringLiteral("--type"), mimeType},
-                        &payload, &wlError)) {
-            continue;
-        }
-        addFormat(mimeType, payload, QStringLiteral("wl-paste"));
-    }
-
-    if (captured.contains(QStringLiteral("text/plain"))) {
-        for (const auto &format : entry.formats) {
-            if (format.mimeType == QStringLiteral("text/plain")) {
-                entry.preview =
-                    normalizeTextPreview(QString::fromUtf8(format.data)).left(2048);
-                break;
-            }
-        }
-    }
-
-    if (entry.preview.isEmpty() && captured.contains(QStringLiteral("text/html"))) {
-        for (const auto &format : entry.formats) {
-            if (format.mimeType == QStringLiteral("text/html")) {
-                entry.preview = htmlToPreview(QString::fromUtf8(format.data)).left(200);
-                break;
-            }
-        }
-    }
-
-    if (entry.preview.isEmpty() && captured.contains(QStringLiteral("text/uri-list"))) {
-        for (const auto &format : entry.formats) {
-            if (format.mimeType == QStringLiteral("text/uri-list")) {
-                const QVector<QUrl> urls = parseUriList(format.data);
-                if (!urls.isEmpty()) {
-                    entry.preview =
-                        QStringLiteral("[Files] %1 item(s)").arg(urls.size());
-                }
-                break;
-            }
-        }
-    }
-
-    if (entry.preview.isEmpty()) {
-        for (const auto &format : entry.formats) {
-            if (!format.mimeType.startsWith(QStringLiteral("image/"))) {
-                continue;
-            }
-            const QImage image = QImage::fromData(format.data);
-            if (!image.isNull()) {
-                entry.preview = QStringLiteral("[Image] %1x%2")
-                                    .arg(image.width())
-                                    .arg(image.height());
-            } else {
-                entry.preview = QStringLiteral("[Image]");
-            }
-            break;
-        }
-    }
-
-    return captureEntry(entry, fromPoll);
-}
-
 void ClipboardDaemon::onClipboardChanged() {
-    if (m_waylandSession && m_waylandWlPasteEnabled) {
-        if (captureWaylandClipboardViaWlPaste(false)) {
-            return;
-        }
-    }
     captureCurrentClipboard(false);
 }
 
 void ClipboardDaemon::pollClipboard() {
     captureCurrentClipboard(true);
-}
-
-void ClipboardDaemon::pollWaylandClipboard() {
-    if (!captureWaylandClipboardViaWlPaste(true)) {
-        captureCurrentClipboard(true);
-    }
 }
 
 void ClipboardDaemon::onNewConnection() {

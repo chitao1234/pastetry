@@ -7,7 +7,6 @@
 #include <QMimeData>
 #include <QObject>
 #include <QHash>
-#include <QStringList>
 #include <QTimer>
 
 class QClipboard;
@@ -26,12 +25,9 @@ private:
     bool isWaylandPlatform() const;
     bool captureEntry(const CapturedEntry &entry, bool fromPoll);
     bool captureCurrentClipboard(bool fromPoll);
-    bool captureWaylandClipboardViaWlPaste(bool fromPoll);
-    bool runWlPaste(const QStringList &args, QByteArray *stdoutData, QString *error) const;
 
     void onClipboardChanged();
     void pollClipboard();
-    void pollWaylandClipboard();
     void onNewConnection();
     void onClientReadyRead(QLocalSocket *socket);
 
@@ -53,10 +49,7 @@ private:
     QString m_lastObservedFingerprint;
     qint64 m_lastCaptureAtMs = 0;
     QTimer m_clipboardPollTimer;
-    QTimer m_waylandClipboardPollTimer;
     bool m_waylandSession = false;
-    bool m_waylandWlPasteEnabled = false;
-    QString m_wlPasteExecutable;
     CapturePolicy m_capturePolicy;
 };
 
